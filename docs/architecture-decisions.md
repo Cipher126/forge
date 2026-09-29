@@ -1,6 +1,6 @@
 # Forge Architecture Decisions
 
-Status: Working draft for review  
+Status: Working draft for review
 Purpose: Record why Forge is designed this way before implementation begins.
 
 ## ADR-001: At-least-once execution

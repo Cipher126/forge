@@ -1,0 +1,89 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="FORGE_",
+        extra="ignore",
+    )
+
+    environment: Literal["development", "test", "production"] = "development"
+    log_level: str = "INFO"
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8000, ge=1, le=65535)
+    max_request_body_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    max_inline_payload_bytes: int = Field(default=256 * 1024, ge=1)
+    postgres_url: str = "postgresql+asyncpg://forge:forge@127.0.0.1:54321/forge"
+    postgres_pool_size: int = Field(default=5, ge=1, le=100)
+    postgres_max_overflow: int = Field(default=5, ge=0, le=100)
+    postgres_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    postgres_pool_recycle_seconds: int = Field(default=1800, ge=30)
+    redis_url: str = "redis://127.0.0.1:56379/0"
+    object_store_endpoint_url: str = "http://127.0.0.1:59000"
+    object_store_access_key: str = "forge"
+    object_store_secret_key: SecretStr = SecretStr("development-only-change-me")
+    object_store_bucket: str = "forge-jobs"
+    api_key_pepper: SecretStr = SecretStr("development-only-change-me")
+    dispatcher_batch_size: int = Field(default=100, ge=1, le=1000)
+    dispatcher_lease_seconds: int = Field(default=30, ge=1)
+    dispatcher_poll_interval_ms: int = Field(default=500, ge=10)
+    dispatcher_retry_base_ms: int = Field(default=500, ge=1)
+    dispatcher_retry_cap_ms: int = Field(default=30_000, ge=1)
+    worker_attempt_lease_seconds: int = Field(default=30, ge=1)
+    worker_lease_renew_interval_seconds: int = Field(default=10, ge=1)
+    worker_retry_base_ms: int = Field(default=1000, ge=1)
+    worker_retry_cap_ms: int = Field(default=60_000, ge=1)
+    worker_concurrency: int = Field(default=4, ge=1, le=256)
+    worker_poll_interval_ms: int = Field(default=100, ge=10)
+    job_type_concurrency_limits: dict[str, int] = Field(
+        default_factory=lambda: {"demo.generate_report": 2}
+    )
+    job_type_permit_lease_seconds: int = Field(default=30, ge=2)
+    job_type_permit_renew_interval_seconds: int = Field(default=10, ge=1)
+    admission_backlog_limit: int = Field(default=50_000, ge=1)
+    admission_retry_after_seconds: int = Field(default=1, ge=1, le=3600)
+    scheduler_batch_size: int = Field(default=100, ge=1, le=1000)
+    scheduler_poll_interval_ms: int = Field(default=500, ge=10)
+    recovery_batch_size: int = Field(default=100, ge=1, le=1000)
+    recovery_poll_interval_ms: int = Field(default=1000, ge=10)
+    delivery_reconciliation_interval_seconds: int = Field(default=30, ge=1)
+    maintenance_interval_seconds: int = Field(default=3600, ge=1)
+    maintenance_batch_size: int = Field(default=100, ge=1, le=1000)
+    job_retention_days: int = Field(default=30, ge=1)
+    orphan_object_grace_hours: int = Field(default=24, ge=0)
+    operational_stream_poll_ms: int = Field(default=1000, ge=100, le=10_000)
+    worker_heartbeat_interval_seconds: int = Field(default=5, ge=1)
+    worker_heartbeat_ttl_seconds: int = Field(default=15, ge=2)
+
+    @model_validator(mode="after")
+    def reject_development_secrets_in_production(self) -> Settings:
+        if self.max_inline_payload_bytes > self.max_request_body_bytes:
+            raise ValueError("inline payload limit cannot exceed the HTTP request-body limit")
+        if any(
+            not job_type or limit < 1
+            for job_type, limit in self.job_type_concurrency_limits.items()
+        ):
+            raise ValueError("job-type concurrency limits require a name and positive limit")
+        if self.job_type_permit_renew_interval_seconds >= self.job_type_permit_lease_seconds:
+            raise ValueError("job-type permit renewal interval must be shorter than its lease")
+        if (
+            self.environment == "production"
+            and self.api_key_pepper.get_secret_value() == "development-only-change-me"
+        ):
+            raise ValueError("FORGE_API_KEY_PEPPER must be set in production")
+        if (
+            self.environment == "production"
+            and self.object_store_secret_key.get_secret_value() == "development-only-change-me"
+        ):
+            raise ValueError("FORGE_OBJECT_STORE_SECRET_KEY must be set in production")
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

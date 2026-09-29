@@ -1,0 +1,48 @@
+name: forge
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${FORGE_DEV_POSTGRES_DB:-forge}
+      POSTGRES_USER: ${FORGE_DEV_POSTGRES_USER:-forge}
+      POSTGRES_PASSWORD: ${FORGE_DEV_POSTGRES_PASSWORD:-forge}
+    ports:
+      - "54321:5432"
+    volumes:
+      - forge-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8.10-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "56379:6379"
+    volumes:
+      - forge-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  object-store:
+    image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command: ["server", "-s3", "-dir=/data", "-s3.port=8333"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${FORGE_DEV_OBJECT_STORE_ACCESS_KEY:-forge}
+      AWS_SECRET_ACCESS_KEY: ${FORGE_DEV_OBJECT_STORE_SECRET_KEY:-development-only-change-me}
+      S3_BUCKET: ${FORGE_OBJECT_STORE_BUCKET:-forge-jobs}
+    ports:
+      - "59000:8333"
+    volumes:
+      - forge-object-store:/data
+
+volumes:
+  forge-postgres:
+  forge-redis:
+  forge-object-store:

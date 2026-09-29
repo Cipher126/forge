@@ -68,6 +68,7 @@ def queue_message(event: ClaimedOutboxEvent) -> QueueMessage:
                 "handler_version": event.payload["handler_version"],
                 "priority": event.payload["priority"],
                 "trace_id": event.payload.get("trace_id"),
+                "parent_span_id": event.payload.get("parent_span_id"),
             }
         )
     except (KeyError, ValueError) as error:

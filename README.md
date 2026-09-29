@@ -214,6 +214,17 @@ through the durable outbox and Redis message, then binds a new worker span so
 API, dispatcher, and worker JSON logs can be correlated without storing request
 bodies or credentials.
 
+Set `FORGE_OTLP_TRACING_ENABLED=true` and configure
+`FORGE_OTLP_TRACES_ENDPOINT` to export batched API and worker spans over OTLP
+HTTP. Sampling is controlled by `FORGE_TRACE_SAMPLE_RATIO`; tracing remains off
+by default.
+
+After migrations, `uv run python scripts/check_startup.py` verifies the Alembic
+head, PostgreSQL, Redis, object storage, and handler registry. Capture real query
+plans after seeding or load testing with
+`uv run python scripts/explain_operations.py`; output is kept under ignored test
+reports so local plans are not presented as portable benchmark evidence.
+
 These values are operational snapshots taken across PostgreSQL and Redis. A
 temporary difference is expected while dispatch, acknowledgement, or recovery
 is in progress.

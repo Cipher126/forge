@@ -14,6 +14,7 @@ from forge.api.routes.jobs import router as jobs_router
 from forge.api.routes.operations import router as operations_router
 from forge.config import get_settings
 from forge.observability.logging import configure_logging
+from forge.observability.tracing import configure_tracing
 from forge.resources import RuntimeResources
 
 
@@ -21,12 +22,20 @@ from forge.resources import RuntimeResources
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level, service="api")
+    tracer_provider = configure_tracing(
+        service="api",
+        enabled=settings.otlp_tracing_enabled,
+        endpoint=settings.otlp_traces_endpoint,
+        sample_ratio=settings.trace_sample_ratio,
+    )
     resources = RuntimeResources.create(settings)
     app.state.resources = resources
     try:
         yield
     finally:
         await resources.close()
+        if tracer_provider is not None:
+            tracer_provider.shutdown()
 
 
 def create_app() -> FastAPI:

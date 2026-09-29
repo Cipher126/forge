@@ -14,6 +14,9 @@ class Settings(BaseSettings):
 
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
+    otlp_tracing_enabled: bool = False
+    otlp_traces_endpoint: str = "http://127.0.0.1:4318/v1/traces"
+    trace_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
     max_request_body_bytes: int = Field(default=10 * 1024 * 1024, ge=1)

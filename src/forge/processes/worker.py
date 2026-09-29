@@ -3,10 +3,12 @@ import json
 import os
 import socket
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from typing import Any
 from uuid import uuid7
 
 import structlog
+from opentelemetry.trace import Span, SpanKind
 
 from forge.application.execution import (
     claim_job_attempt,
@@ -25,7 +27,7 @@ from forge.errors.execution import (
     JobTypePermitLostError,
 )
 from forge.observability.logging import configure_logging
-from forge.observability.tracing import bind_trace
+from forge.observability.tracing import configure_tracing, start_span
 from forge.processes.lifecycle import run_process, wait_for_shutdown
 from forge.queue.client import (
     acknowledge_message,
@@ -264,9 +266,16 @@ async def handle_reservation(
         await logger.aerror("invalid_queue_message", queue=reservation.source_queue)
         return
 
+    span_manager: AbstractContextManager[Span] | None = None
     trace_bound = message.trace_id is not None
     if message.trace_id is not None:
-        bind_trace(message.trace_id)
+        span_manager, span_id = start_span(
+            "forge job execute",
+            trace_id=message.trace_id,
+            parent_span_id=message.parent_span_id,
+            kind=SpanKind.CONSUMER,
+        )
+        structlog.contextvars.bind_contextvars(trace_id=message.trace_id, span_id=span_id)
 
     permit: JobTypePermit | None = None
     limit = settings.job_type_concurrency_limits.get(message.job_type)
@@ -308,11 +317,19 @@ async def handle_reservation(
             await release_job_type_permit(resources.redis, permit)
         if trace_bound:
             structlog.contextvars.unbind_contextvars("trace_id", "span_id")
+        if span_manager is not None:
+            span_manager.__exit__(None, None, None)
 
 
 async def run_worker(shutdown: asyncio.Event) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, service="worker")
+    tracer_provider = configure_tracing(
+        service="worker",
+        enabled=settings.otlp_tracing_enabled,
+        endpoint=settings.otlp_traces_endpoint,
+        sample_ratio=settings.trace_sample_ratio,
+    )
     resources = RuntimeResources.create(settings)
     worker_id = create_worker_id()
     thread_pool = ThreadPoolExecutor(max_workers=settings.worker_concurrency)
@@ -368,6 +385,8 @@ async def run_worker(shutdown: asyncio.Event) -> None:
         thread_pool.shutdown(wait=True, cancel_futures=True)
         process_pool.shutdown(wait=True, cancel_futures=True)
         await resources.close()
+        if tracer_provider is not None:
+            tracer_provider.shutdown()
 
 
 def main() -> None:

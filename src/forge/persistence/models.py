@@ -127,6 +127,16 @@ class Job(Base):
             name="finished_at_matches_state",
         ),
         Index("ix_jobs_status_created_at", "status", "created_at"),
+        Index("ix_jobs_api_key_id_id", "api_key_id", "id"),
+        Index("ix_jobs_created_at", "created_at"),
+        Index(
+            "ix_jobs_terminal_finished_at",
+            "finished_at",
+            "id",
+            postgresql_where=text(
+                "status IN ('succeeded', 'failed', 'dead_lettered', 'cancelled')"
+            ),
+        ),
         Index("ix_jobs_job_type_status_created_at", "job_type", "status", "created_at"),
         Index(
             "ix_jobs_due",
@@ -295,6 +305,7 @@ class JobTransition(Base):
         ),
         CheckConstraint("actor_id IS NULL OR char_length(actor_id) <= 128", name="actor_id_length"),
         Index("ix_job_transitions_job_id_created_at", "job_id", "created_at"),
+        Index("ix_job_transitions_to_status_created_at", "to_status", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(

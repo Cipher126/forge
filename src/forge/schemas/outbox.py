@@ -25,3 +25,4 @@ class QueueMessage(BaseModel):
     handler_version: str
     priority: Literal["high", "normal", "low"]
     trace_id: str | None = None
+    parent_span_id: str | None = None

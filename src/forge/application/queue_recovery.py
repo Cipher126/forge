@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.application.execution import parse_queue_message
 from forge.domain.jobs import JobStatus
 from forge.errors.execution import InvalidQueueMessageError
-from forge.observability.tracing import current_trace_id
+from forge.observability.tracing import current_span_id, current_trace_id
 from forge.persistence.models import Job
 from forge.queue.names import PRIORITY_CYCLE, queue_key
 from forge.schemas.execution import ReservedQueueMessage
@@ -56,6 +56,7 @@ async def restore_missing_queued_deliveries(
             handler_version=job.handler_version,
             priority=cast(Literal["high", "normal", "low"], job.priority),
             trace_id=current_trace_id(),
+            parent_span_id=current_span_id(),
         )
         await redis.rpush(queue_key(job.priority), message.model_dump_json())
         restored.append(job.id)

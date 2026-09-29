@@ -22,7 +22,7 @@ from forge.errors.jobs import (
     JobResultUnavailableError,
 )
 from forge.errors.payloads import InlinePayloadTooLargeError
-from forge.observability.tracing import current_trace_id
+from forge.observability.tracing import current_span_id, current_trace_id
 from forge.persistence.models import (
     ApiKey,
     IdempotencyKey,
@@ -378,6 +378,7 @@ async def submit_job(
                     "handler_version": job.handler_version,
                     "priority": job.priority,
                     "trace_id": current_trace_id(),
+                    "parent_span_id": current_span_id(),
                 },
                 available_at=database_now,
             )

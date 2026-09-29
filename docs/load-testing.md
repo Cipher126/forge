@@ -45,3 +45,15 @@ backpressure rather than silent data loss.
 Post-run verification should compare `forge_jobs_accepted` with PostgreSQL job
 counts and inspect `/v1/admin/operations/performance` for throughput, queue wait,
 execution duration, retries, and scheduling lag.
+
+When k6 is unavailable locally but Docker Desktop is running, the repository
+runner creates a temporary high-rate key, starts the Forge processes, executes
+the digest-pinned k6 1.8.1 container, waits for accepted work, and removes its
+database records:
+
+```powershell
+uv run python scripts/run_local_benchmark.py --rate 10 --duration 20s --port 18080
+```
+
+The credential is passed through the child-process environment and is never
+printed or written to the result file.

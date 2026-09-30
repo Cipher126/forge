@@ -9,6 +9,7 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import BinaryIO
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -16,6 +17,7 @@ from sqlalchemy import text as sql_text
 
 from forge.config import get_settings
 from forge.persistence.models import ApiKey, Job
+from forge.queue.names import PRIORITY_CYCLE, queue_key
 from forge.resources import RuntimeResources
 from forge.security.api_keys import issue_api_key
 
@@ -74,11 +76,36 @@ async def wait_for_jobs(api_key_id: UUID, timeout_seconds: int = 60) -> int:
 async def cleanup(api_key_id: UUID) -> None:
     resources = RuntimeResources.create(get_settings())
     try:
+        async with resources.sessions() as session:
+            job_ids = set(
+                await session.scalars(select(Job.id).where(Job.api_key_id == api_key_id))
+            )
+        await remove_queue_messages(resources, job_ids)
         async with resources.sessions.begin() as session:
             await session.execute(delete(Job).where(Job.api_key_id == api_key_id))
             await session.execute(delete(ApiKey).where(ApiKey.id == api_key_id))
     finally:
         await resources.close()
+
+
+async def remove_queue_messages(resources: RuntimeResources, job_ids: set[UUID]) -> int:
+    if not job_ids:
+        return 0
+    expected = {str(job_id) for job_id in job_ids}
+    keys = [queue_key(priority) for priority in dict.fromkeys(PRIORITY_CYCLE)]
+    async for raw_key in resources.redis.scan_iter(match="forge:processing:*"):
+        keys.append(raw_key.decode() if isinstance(raw_key, bytes) else raw_key)
+    removed = 0
+    for key in keys:
+        for raw in await resources.redis.lrange(key, 0, -1):
+            decoded = raw.decode() if isinstance(raw, bytes) else raw
+            try:
+                queued_job_id = str(json.loads(decoded)["job_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if queued_job_id in expected:
+                removed += int(await resources.redis.lrem(key, 1, decoded))
+    return removed
 
 
 async def sample_postgres(stop: threading.Event) -> dict[str, object]:
@@ -159,32 +186,35 @@ def main() -> int:
     parser.add_argument("--duration", default="20s")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--api-workers", type=int, default=1)
+    parser.add_argument("--redis-db", type=int, default=15, choices=range(1, 16))
     parser.add_argument(
         "--processes",
-        choices=("api-only", "all"),
+        choices=("api-only", "api-dispatcher", "api-dispatcher-worker", "all"),
         default="all",
-        help="Run only durable API acceptance or the complete local process topology.",
+        help="Select the local process topology used during the benchmark.",
     )
     parser.add_argument("--summary-name", default="k6-summary.json")
     arguments = parser.parse_args()
     REPORTS.mkdir(parents=True, exist_ok=True)
     summary = ROOT / "load" / "results" / arguments.summary_name
     summary.unlink(missing_ok=True)
+    base_redis_url = urlsplit(get_settings().redis_url)
+    os.environ["FORGE_REDIS_URL"] = urlunsplit(
+        base_redis_url._replace(path=f"/{arguments.redis_db}")
+    )
+    get_settings.cache_clear()
     api_key_id, credential = asyncio.run(create_benchmark_key())
     process_environment = os.environ.copy()
     process_environment["FORGE_API_HOST"] = "0.0.0.0"
     process_environment["FORGE_API_PORT"] = str(arguments.port)
     process_environment["FORGE_API_WORKERS"] = str(arguments.api_workers)
     executables = ["forge-api.exe"]
+    if arguments.processes in {"api-dispatcher", "api-dispatcher-worker", "all"}:
+        executables.append("forge-dispatcher.exe")
+    if arguments.processes in {"api-dispatcher-worker", "all"}:
+        executables.append("forge-worker.exe")
     if arguments.processes == "all":
-        executables.extend(
-            [
-                "forge-dispatcher.exe",
-                "forge-scheduler.exe",
-                "forge-recovery.exe",
-                "forge-worker.exe",
-            ]
-        )
+        executables.extend(["forge-scheduler.exe", "forge-recovery.exe"])
     processes: list[subprocess.Popen[bytes]] = []
     logs: list[BinaryIO] = []
     sampler_stop = threading.Event()
@@ -244,7 +274,7 @@ def main() -> int:
         sampler_stop.set()
         sampler.join(timeout=5)
         exit_code = completed.returncode
-        if arguments.processes == "all":
+        if arguments.processes in {"api-dispatcher-worker", "all"}:
             outstanding = asyncio.run(wait_for_jobs(api_key_id))
             if outstanding:
                 print(f"warning: {outstanding} benchmark jobs remained outstanding")
@@ -264,8 +294,8 @@ def main() -> int:
         if sampler.is_alive():
             sampler.join(timeout=5)
         stop_processes(processes)
-        for log in logs:
-            log.close()
+        for log_handle in logs:
+            log_handle.close()
         asyncio.run(cleanup(api_key_id))
     return exit_code
 

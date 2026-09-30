@@ -103,3 +103,16 @@ The investigation also found that terminating only the Windows console-script
 launcher left Uvicorn multiprocessing children alive. The benchmark runner now
 terminates each complete process tree, and the clean runs verified that their
 listening ports were released afterward.
+
+Further topology isolation showed that API plus dispatcher completed 100/100
+requests at a 51.2 ms p95. API, dispatcher, and worker with two Uvicorn workers
+left persistent requests attached to one Windows API child, even in a dedicated
+Redis database. The same topology with one API worker completed normally.
+
+The final full-topology Windows baseline therefore used one API worker at 10
+jobs/s for 20 seconds. All 201 submissions completed with no HTTP failures or
+dropped iterations. Median latency was 25.1 ms, p90 was 35.2 ms, p95 was 40.9
+ms, and maximum latency was 175.6 ms. PostgreSQL peaked at two active sessions,
+with no advisory-lock waits. This replaces the earlier invalid full-topology
+comparison for local Windows; multi-process results must be measured in the
+Linux deployment environment.

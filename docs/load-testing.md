@@ -62,8 +62,17 @@ Use `--processes api-only` to measure durable acceptance without dispatcher and
 worker traffic. `--api-workers` controls the Uvicorn process count. The runner
 also samples `pg_stat_activity` during the load window and adds peak connection,
 peak active-session, and observed wait-event counts to the local JSON summary.
+Intermediate topologies `api-dispatcher` and `api-dispatcher-worker` isolate
+background-process effects. By default, benchmark traffic uses Redis database
+15 so local tests do not consume or delete messages in Forge's normal database.
+Cleanup removes only messages tied to the temporary benchmark API key.
 
 ```powershell
 uv run python scripts/run_local_benchmark.py --processes api-only --api-workers 2 --rate 10 --duration 20s --port 18082 --summary-name api-only-2w-10rps.json
-uv run python scripts/run_local_benchmark.py --processes all --api-workers 2 --rate 10 --duration 20s --port 18082 --summary-name full-2w-10rps.json
+uv run python scripts/run_local_benchmark.py --processes all --api-workers 1 --rate 10 --duration 20s --port 18082 --summary-name full-1w-10rps.json
 ```
+
+On Windows, use one API worker for full-topology capacity measurements. The
+combination of Uvicorn's Windows multiprocessing supervisor and the separate
+Forge worker left connections pinned to one API child during local testing.
+Measure multi-process production capacity using the Linux deployment image.

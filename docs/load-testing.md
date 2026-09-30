@@ -57,3 +57,13 @@ uv run python scripts/run_local_benchmark.py --rate 10 --duration 20s --port 180
 
 The credential is passed through the child-process environment and is never
 printed or written to the result file.
+
+Use `--processes api-only` to measure durable acceptance without dispatcher and
+worker traffic. `--api-workers` controls the Uvicorn process count. The runner
+also samples `pg_stat_activity` during the load window and adds peak connection,
+peak active-session, and observed wait-event counts to the local JSON summary.
+
+```powershell
+uv run python scripts/run_local_benchmark.py --processes api-only --api-workers 2 --rate 10 --duration 20s --port 18082 --summary-name api-only-2w-10rps.json
+uv run python scripts/run_local_benchmark.py --processes all --api-workers 2 --rate 10 --duration 20s --port 18082 --summary-name full-2w-10rps.json
+```

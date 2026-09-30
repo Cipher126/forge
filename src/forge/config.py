@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     trace_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
+    api_workers: int = Field(default=1, ge=1, le=32)
     max_request_body_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     max_inline_payload_bytes: int = Field(default=256 * 1024, ge=1)
     postgres_url: str = "postgresql+asyncpg://forge:forge@127.0.0.1:54321/forge"

@@ -11,6 +11,7 @@ def main() -> None:
         "forge.api.app:app",
         host=settings.api_host,
         port=settings.api_port,
+        workers=settings.api_workers,
         reload=False,
         log_config=None,
     )

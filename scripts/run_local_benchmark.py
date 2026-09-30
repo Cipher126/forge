@@ -3,13 +3,16 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
+from sqlalchemy import text as sql_text
 
 from forge.config import get_settings
 from forge.persistence.models import ApiKey, Job
@@ -78,6 +81,45 @@ async def cleanup(api_key_id: UUID) -> None:
         await resources.close()
 
 
+async def sample_postgres(stop: threading.Event) -> dict[str, object]:
+    resources = RuntimeResources.create(get_settings())
+    samples = 0
+    peak_connections = 0
+    peak_active = 0
+    waits: Counter[str] = Counter()
+    try:
+        while not stop.is_set():
+            async with resources.database.connect() as connection:
+                rows = (
+                    await connection.execute(
+                        sql_text(
+                            "SELECT state, wait_event_type, wait_event "
+                            "FROM pg_stat_activity "
+                            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                        )
+                    )
+                ).all()
+            samples += 1
+            peak_connections = max(peak_connections, len(rows))
+            peak_active = max(peak_active, sum(row.state == "active" for row in rows))
+            for row in rows:
+                if row.wait_event_type:
+                    waits[f"{row.wait_event_type}:{row.wait_event}"] += 1
+            await asyncio.sleep(0.1)
+    finally:
+        await resources.close()
+    return {
+        "samples": samples,
+        "peak_connections": peak_connections,
+        "peak_active": peak_active,
+        "observed_waits": dict(waits.most_common()),
+    }
+
+
+def postgres_sampler(stop: threading.Event, result: dict[str, object]) -> None:
+    result.update(asyncio.run(sample_postgres(stop)))
+
+
 def wait_for_api(port: int, timeout_seconds: int = 30) -> None:
     deadline = time.monotonic() + timeout_seconds
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -109,6 +151,13 @@ def main() -> int:
     parser.add_argument("--rate", type=int, default=10)
     parser.add_argument("--duration", default="20s")
     parser.add_argument("--port", type=int, default=18080)
+    parser.add_argument("--api-workers", type=int, default=1)
+    parser.add_argument(
+        "--processes",
+        choices=("api-only", "all"),
+        default="all",
+        help="Run only durable API acceptance or the complete local process topology.",
+    )
     parser.add_argument("--summary-name", default="k6-summary.json")
     arguments = parser.parse_args()
     REPORTS.mkdir(parents=True, exist_ok=True)
@@ -118,15 +167,26 @@ def main() -> int:
     process_environment = os.environ.copy()
     process_environment["FORGE_API_HOST"] = "0.0.0.0"
     process_environment["FORGE_API_PORT"] = str(arguments.port)
-    executables = [
-        "forge-api.exe",
-        "forge-dispatcher.exe",
-        "forge-scheduler.exe",
-        "forge-recovery.exe",
-        "forge-worker.exe",
-    ]
+    process_environment["FORGE_API_WORKERS"] = str(arguments.api_workers)
+    executables = ["forge-api.exe"]
+    if arguments.processes == "all":
+        executables.extend(
+            [
+                "forge-dispatcher.exe",
+                "forge-scheduler.exe",
+                "forge-recovery.exe",
+                "forge-worker.exe",
+            ]
+        )
     processes: list[subprocess.Popen[bytes]] = []
     logs: list[BinaryIO] = []
+    sampler_stop = threading.Event()
+    database_diagnostics: dict[str, object] = {}
+    sampler = threading.Thread(
+        target=postgres_sampler,
+        args=(sampler_stop, database_diagnostics),
+        daemon=True,
+    )
     exit_code = 1
     try:
         for executable in executables:
@@ -142,6 +202,7 @@ def main() -> int:
                 )
             )
         wait_for_api(arguments.port)
+        sampler.start()
         docker_environment = os.environ.copy()
         docker_environment.update(
             {
@@ -173,15 +234,28 @@ def main() -> int:
             "/load/k6/submit-jobs.js",
         ]
         completed = subprocess.run(command, env=docker_environment, cwd=ROOT, check=False)
+        sampler_stop.set()
+        sampler.join(timeout=5)
         exit_code = completed.returncode
-        outstanding = asyncio.run(wait_for_jobs(api_key_id))
-        if outstanding:
-            print(f"warning: {outstanding} benchmark jobs remained outstanding")
+        if arguments.processes == "all":
+            outstanding = asyncio.run(wait_for_jobs(api_key_id))
+            if outstanding:
+                print(f"warning: {outstanding} benchmark jobs remained outstanding")
         if summary.exists():
             report = json.loads(summary.read_text(encoding="utf-8"))
+            report["topology"] = {
+                "processes": arguments.processes,
+                "api_workers": arguments.api_workers,
+            }
+            report["postgres"] = database_diagnostics
+            summary.write_text(f"{json.dumps(report, indent=2)}\n", encoding="utf-8")
             metrics = report["metrics"]
             print(json.dumps(metrics, indent=2, sort_keys=True))
+            print(json.dumps({"postgres": database_diagnostics}, indent=2, sort_keys=True))
     finally:
+        sampler_stop.set()
+        if sampler.is_alive():
+            sampler.join(timeout=5)
         stop_processes(processes)
         for log in logs:
             log.close()

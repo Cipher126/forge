@@ -10,10 +10,10 @@ from sqlalchemy import delete, func, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from forge.application.admission import claim_admission_slot, release_admission_slot
 from forge.application.audit import record_audit_event
 from forge.domain.handlers import HandlerDefinition, HandlerRegistry
 from forge.domain.jobs import JobPriority, JobStatus, TransitionActor
-from forge.errors.capacity import SystemOverloadedError
 from forge.errors.jobs import (
     IdempotencyConflictError,
     JobCancellationConflictError,
@@ -59,42 +59,6 @@ class JobPage:
 
 IDEMPOTENCY_RETENTION = timedelta(hours=24)
 MAX_ATTEMPTS_LIMIT = 20
-ADMISSION_LOCK_KEY = 2_026_091_847
-OUTSTANDING_STATUSES = tuple(
-    status.value
-    for status in (
-        JobStatus.SCHEDULED,
-        JobStatus.QUEUED,
-        JobStatus.RUNNING,
-        JobStatus.RETRY_SCHEDULED,
-        JobStatus.CANCELLATION_REQUESTED,
-    )
-)
-
-
-async def enforce_backlog_limit(
-    session: AsyncSession,
-    *,
-    limit: int,
-    retry_after_seconds: int,
-) -> None:
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": ADMISSION_LOCK_KEY},
-    )
-    backlog = await session.scalar(
-        select(func.count()).select_from(Job).where(Job.status.in_(OUTSTANDING_STATUSES))
-    )
-    if backlog is None:
-        raise RuntimeError("PostgreSQL did not return the outstanding job count")
-    if backlog >= limit:
-        raise SystemOverloadedError(
-            backlog=backlog,
-            limit=limit,
-            retry_after_seconds=retry_after_seconds,
-        )
-
-
 def _visible_job_condition(api_key: ApiKey) -> ColumnElement[bool]:
     if "admin" in api_key.scopes:
         return true()
@@ -303,9 +267,11 @@ async def submit_job(
         if existing_job is not None:
             return SubmissionResult(job=existing_job, deduplicated=True)
 
+    job_id = uuid7()
     if backlog_limit is not None:
-        await enforce_backlog_limit(
+        await claim_admission_slot(
             session,
+            job_id=job_id,
             limit=backlog_limit,
             retry_after_seconds=retry_after_seconds,
         )
@@ -323,7 +289,7 @@ async def submit_job(
 
     status = JobStatus.SCHEDULED if scheduled_for is not None else JobStatus.QUEUED
     job = Job(
-        id=uuid7(),
+        id=job_id,
         api_key_id=api_key.id,
         replayed_from_job_id=submission.replayed_from_job_id,
         job_type=submission.job_type,
@@ -416,6 +382,7 @@ async def cancel_job(
     else:
         job.status = JobStatus.CANCELLED.value
         job.finished_at = database_now
+        await release_admission_slot(session, job.id)
         reason = "job_cancelled"
     job.updated_at = database_now
     session.add(

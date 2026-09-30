@@ -34,6 +34,13 @@ Constraints enforce positive attempt limits, a valid attempt count, exactly one
 payload location, at most one result location, valid checked-text states and
 priorities, and a schedule timestamp for scheduled states.
 
+## Admission slots
+
+`admission_slots` contains the fixed pool of backlog capacity. A non-null
+`job_id` reserves exactly one slot for an outstanding job; the unique deferred
+foreign key ties capacity to durable job creation while allowing the slot claim
+to occur before the job insert inside one transaction.
+
 ## Idempotency keys
 
 `idempotency_keys` has a unique `(api_key_id, idempotency_key)` pair, normalized

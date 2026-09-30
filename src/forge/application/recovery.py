@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge.application.admission import release_admission_slot
 from forge.application.execution import retry_delay_ms
 from forge.domain.jobs import FailureKind, JobStatus, TransitionActor
 from forge.persistence.models import Job, JobAttempt, JobTransition
@@ -77,6 +78,8 @@ async def recover_expired_attempts(
 
         job.status = next_status.value
         job.updated_at = database_now
+        if next_status in {JobStatus.CANCELLED, JobStatus.DEAD_LETTERED}:
+            await release_admission_slot(session, job.id)
         session.add(
             JobTransition(
                 job_id=job.id,

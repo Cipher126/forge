@@ -82,3 +82,24 @@ One instrumented API-only repeat was excluded from the table because ten HTTP
 requests did not complete before k6's 30-second graceful-stop deadline. The
 runner reported the interruption, and treating that partial run as a successful
 capacity measurement would be misleading.
+
+## Admission-slot follow-up — 2026-09-30
+
+Replacing the global admission advisory lock with independent PostgreSQL slots
+removed that wait from a clean two-worker API-only control run. At 10 jobs/s for
+10 seconds, all 101 submissions completed with no failures or dropped
+iterations. Median latency was 26.9 ms, p90 was 37.5 ms, p95 was 53.8 ms, and
+maximum latency was 204.1 ms. PostgreSQL peaked at one active session, and the
+sampler observed no advisory-lock waits.
+
+A full-topology run completed 193 submissions at a 41.8 ms p95 but left eight
+HTTP requests open until k6's graceful-stop deadline. PostgreSQL again showed no
+advisory-lock waits and peaked at three active sessions. That run is excluded as
+a capacity pass: it demonstrates that the database serialization was removed,
+while also exposing a separate interaction with the dispatcher/worker topology
+that still needs isolation.
+
+The investigation also found that terminating only the Windows console-script
+launcher left Uvicorn multiprocessing children alive. The benchmark runner now
+terminates each complete process tree, and the clean runs verified that their
+listening ports were released afterward.

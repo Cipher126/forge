@@ -192,6 +192,22 @@ class Job(Base):
         return self.result_blob_key is not None
 
 
+class AdmissionSlot(Base):
+    __tablename__ = "admission_slots"
+
+    slot_number: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    job_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey(
+            "jobs.id",
+            ondelete="SET NULL",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        unique=True,
+    )
+
+
 class JobAttempt(Base):
     __tablename__ = "job_attempts"
     __table_args__ = (

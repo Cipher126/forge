@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge.application.admission import release_admission_slot
 from forge.domain.handlers import ExecutionMode, HandlerDefinition
 from forge.domain.jobs import FailureKind, JobStatus, TransitionActor
 from forge.errors.execution import (
@@ -155,6 +156,7 @@ async def complete_attempt_success(
     job.active_attempt_id = None
     job.finished_at = database_now
     job.updated_at = database_now
+    await release_admission_slot(session, job.id)
     session.add(
         JobTransition(
             job_id=job.id,
@@ -233,6 +235,8 @@ async def complete_attempt_failure(
         else None
     )
     job.updated_at = database_now
+    if next_status in {JobStatus.CANCELLED, JobStatus.DEAD_LETTERED, JobStatus.FAILED}:
+        await release_admission_slot(session, job.id)
     session.add(
         JobTransition(
             job_id=job.id,

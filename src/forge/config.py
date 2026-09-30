@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     )
     job_type_permit_lease_seconds: int = Field(default=30, ge=2)
     job_type_permit_renew_interval_seconds: int = Field(default=10, ge=1)
-    admission_backlog_limit: int = Field(default=50_000, ge=1)
+    admission_backlog_limit: int = Field(default=50_000, ge=1, le=50_000)
     admission_retry_after_seconds: int = Field(default=1, ge=1, le=3600)
     scheduler_batch_size: int = Field(default=100, ge=1, le=1000)
     scheduler_poll_interval_ms: int = Field(default=500, ge=10)

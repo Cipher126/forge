@@ -138,7 +138,14 @@ def wait_for_api(port: int, timeout_seconds: int = 30) -> None:
 def stop_processes(processes: list[subprocess.Popen[bytes]]) -> None:
     for process in reversed(processes):
         if process.poll() is None:
-            process.terminate()
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    check=False,
+                    capture_output=True,
+                )
+            else:
+                process.terminate()
     for process in reversed(processes):
         try:
             process.wait(timeout=10)

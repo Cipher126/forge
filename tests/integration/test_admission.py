@@ -80,6 +80,20 @@ async def test_admission_limit_is_atomic_and_preserves_idempotent_retries() -> N
                 )
                 assert repeated.status_code == 200
                 assert repeated.json()["id"] == responses[accepted_index].json()["id"]
+
+                cancelled = await client.post(
+                    f"/v1/jobs/{repeated.json()['id']}/cancel",
+                    headers=headers[accepted_index],
+                )
+                assert cancelled.status_code == 200
+
+                replacement_index = 1 - accepted_index
+                replacement = await client.post(
+                    "/v1/jobs",
+                    headers=headers[replacement_index],
+                    json=bodies[replacement_index],
+                )
+                assert replacement.status_code == 202
     finally:
         settings.admission_backlog_limit = original_limit
         settings.admission_retry_after_seconds = original_retry_after

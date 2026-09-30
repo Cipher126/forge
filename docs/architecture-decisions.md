@@ -102,8 +102,14 @@ its own rate limit receives `429 Too Many Requests`; system overload produces
 `503 Service Unavailable` with `Retry-After`.
 
 Initial defaults are four concurrent attempts per worker, a backlog threshold of
-50,000 jobs, a one-second backlog refresh, 30-second permit leases, and permit
-renewal every 10 seconds. Testing will determine final values.
+50,000 jobs, 30-second permit leases, and permit renewal every 10 seconds.
+Testing will determine final values.
+
+The backlog threshold is represented by 50,000 preallocated PostgreSQL admission
+slots. A submission claims one available slot with `FOR UPDATE SKIP LOCKED`, and
+terminal job transitions release it in the same transaction. This keeps the cap
+exact without forcing every submission through one global advisory lock. A
+deferred foreign key prevents a committed slot from referencing a missing job.
 
 ## ADR-009: Scoped opaque API keys
 

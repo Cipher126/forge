@@ -9,7 +9,7 @@ from forge.domain.handlers import (
 )
 from forge.errors.handlers import HandlerRegistryError, UnknownHandlerError
 from forge.handlers.registry import create_handler_registry
-from forge.schemas.handlers import GenerateReportPayload
+from forge.schemas.handlers import GenerateReportPayload, WaitPayload
 
 
 class Payload(BaseModel):
@@ -91,3 +91,13 @@ def test_demo_payload_rejects_unknown_fields() -> None:
 
     with pytest.raises(ValidationError):
         definition.validate_payload({"report_id": "quarterly", "format": "pdf", "unexpected": True})
+
+
+def test_wait_payload_is_bounded_for_failure_validation() -> None:
+    definition = create_handler_registry().resolve("demo.wait")
+
+    payload = definition.validate_payload({"task_id": "worker-kill", "duration_seconds": 30})
+    assert payload == WaitPayload(task_id="worker-kill", duration_seconds=30)
+
+    with pytest.raises(ValidationError):
+        definition.validate_payload({"task_id": "too-long", "duration_seconds": 121})

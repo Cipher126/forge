@@ -26,6 +26,7 @@ class RuntimeResources:
             settings.postgres_url,
             pool_size=settings.postgres_pool_size,
             max_overflow=settings.postgres_max_overflow,
+            connect_timeout_seconds=settings.postgres_connect_timeout_seconds,
             pool_timeout_seconds=settings.postgres_pool_timeout_seconds,
             pool_recycle_seconds=settings.postgres_pool_recycle_seconds,
         )
@@ -33,13 +34,21 @@ class RuntimeResources:
             settings=settings,
             database=database,
             sessions=async_sessionmaker(database, expire_on_commit=False),
-            redis=create_redis_client(settings.redis_url),
+            redis=create_redis_client(
+                settings.redis_url,
+                connect_timeout_seconds=settings.redis_connect_timeout_seconds,
+                operation_timeout_seconds=settings.redis_operation_timeout_seconds,
+            ),
             handlers=create_handler_registry(),
             object_store=ObjectStore(
                 endpoint_url=settings.object_store_endpoint_url,
                 access_key=settings.object_store_access_key,
                 secret_key=settings.object_store_secret_key.get_secret_value(),
                 bucket=settings.object_store_bucket,
+                connect_timeout_seconds=settings.object_store_connect_timeout_seconds,
+                read_timeout_seconds=settings.object_store_read_timeout_seconds,
+                max_attempts=settings.object_store_max_attempts,
+                operation_timeout_seconds=settings.object_store_operation_timeout_seconds,
             ),
         )
 

@@ -27,6 +27,7 @@ from forge.errors.jobs import (
     JobReplayConflictError,
     JobResultUnavailableError,
 )
+from forge.errors.object_store import ObjectStoreUnavailableError
 from forge.errors.payloads import InlinePayloadTooLargeError
 from forge.schemas.errors import ErrorDetail, ErrorResponse
 
@@ -206,7 +207,7 @@ async def redis_unavailable_handler(request: Request, _error: RedisError) -> JSO
 
 
 async def object_store_unavailable_handler(
-    request: Request, _error: BotoCoreError | ClientError
+    request: Request, _error: BotoCoreError | ClientError | ObjectStoreUnavailableError
 ) -> JSONResponse:
     return await dependency_unavailable_handler(
         request, DependencyUnavailableError("object_store")
@@ -214,7 +215,8 @@ async def object_store_unavailable_handler(
 
 
 async def database_unavailable_handler(
-    request: Request, _error: OperationalError | InterfaceError | DisconnectionError
+    request: Request,
+    _error: OperationalError | InterfaceError | DisconnectionError | OSError,
 ) -> JSONResponse:
     return await dependency_unavailable_handler(
         request, DependencyUnavailableError("postgres")
@@ -267,6 +269,8 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RedisError, redis_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(BotoCoreError, object_store_unavailable_handler)
     app.add_exception_handler(ClientError, object_store_unavailable_handler)
+    app.add_exception_handler(ObjectStoreUnavailableError, object_store_unavailable_handler)
     app.add_exception_handler(OperationalError, database_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(InterfaceError, database_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(DisconnectionError, database_unavailable_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(OSError, database_unavailable_handler)  # type: ignore[arg-type]

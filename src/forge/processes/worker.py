@@ -9,6 +9,8 @@ from uuid import uuid7
 
 import structlog
 from opentelemetry.trace import Span, SpanKind
+from redis.exceptions import RedisError
+from sqlalchemy.exc import DBAPIError
 
 from forge.application.execution import (
     claim_job_attempt,
@@ -28,7 +30,7 @@ from forge.errors.execution import (
 )
 from forge.observability.logging import configure_logging
 from forge.observability.tracing import configure_tracing, start_span
-from forge.processes.lifecycle import run_process, wait_for_shutdown
+from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
 from forge.queue.client import (
     acknowledge_message,
     acquire_job_type_permit,
@@ -58,14 +60,33 @@ async def maintain_worker_heartbeat(
     resources: RuntimeResources,
     settings: Settings,
     worker_id: str,
+    shutdown: asyncio.Event,
 ) -> None:
-    while True:
-        await refresh_worker_heartbeat(
-            resources.redis,
-            worker_id,
-            settings.worker_heartbeat_ttl_seconds,
-        )
-        await asyncio.sleep(settings.worker_heartbeat_interval_seconds)
+    retry_attempt = 0
+    while not shutdown.is_set():
+        try:
+            await refresh_worker_heartbeat(
+                resources.redis,
+                worker_id,
+                settings.worker_heartbeat_ttl_seconds,
+            )
+        except RedisError as error:
+            delay = retry_delay_seconds(
+                retry_attempt,
+                base_ms=settings.redis_retry_base_ms,
+                cap_ms=settings.redis_retry_cap_ms,
+            )
+            retry_attempt += 1
+            await logger.awarning(
+                "redis_reconnect_wait",
+                operation="worker_heartbeat",
+                delay_seconds=round(delay, 3),
+                error=str(error),
+            )
+            await wait_for_shutdown(shutdown, delay)
+            continue
+        retry_attempt = 0
+        await wait_for_shutdown(shutdown, settings.worker_heartbeat_interval_seconds)
 
 
 async def renew_while_running(
@@ -321,6 +342,78 @@ async def handle_reservation(
             span_manager.__exit__(None, None, None)
 
 
+async def handle_reservation_with_recovery(
+    resources: RuntimeResources,
+    settings: Settings,
+    reservation: ReservedQueueMessage,
+    worker_id: str,
+    thread_pool: Executor,
+    process_pool: Executor,
+    shutdown: asyncio.Event,
+) -> None:
+    try:
+        await handle_reservation(
+            resources,
+            settings,
+            reservation,
+            worker_id,
+            thread_pool,
+            process_pool,
+        )
+    except RedisError as error:
+        retry_attempt = 0
+        await logger.awarning(
+            "reservation_interrupted_by_redis",
+            queue=reservation.processing_queue,
+            error=str(error),
+        )
+        while not shutdown.is_set():
+            try:
+                requeued = await requeue_message(resources.redis, reservation)
+            except RedisError as retry_error:
+                delay = retry_delay_seconds(
+                    retry_attempt,
+                    base_ms=settings.redis_retry_base_ms,
+                    cap_ms=settings.redis_retry_cap_ms,
+                )
+                retry_attempt += 1
+                await logger.awarning(
+                    "redis_reconnect_wait",
+                    operation="requeue_interrupted_reservation",
+                    delay_seconds=round(delay, 3),
+                    error=str(retry_error),
+                )
+                await wait_for_shutdown(shutdown, delay)
+                continue
+            await logger.awarning(
+                "interrupted_reservation_reconciled",
+                queue=reservation.processing_queue,
+                requeued=requeued,
+            )
+            return
+    except (DBAPIError, OSError) as error:
+        await logger.awarning(
+            "reservation_interrupted_by_database",
+            queue=reservation.processing_queue,
+            error=str(error),
+        )
+        try:
+            requeued = await requeue_message(resources.redis, reservation)
+        except RedisError as retry_error:
+            await logger.awarning(
+                "database_interrupted_reservation_requeue_failed",
+                queue=reservation.processing_queue,
+                error=str(retry_error),
+            )
+        else:
+            await logger.awarning(
+                "interrupted_reservation_reconciled",
+                queue=reservation.processing_queue,
+                requeued=requeued,
+                cause="database_unavailable",
+            )
+
+
 async def run_worker(shutdown: asyncio.Event) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, service="worker")
@@ -336,12 +429,10 @@ async def run_worker(shutdown: asyncio.Event) -> None:
     process_pool = ProcessPoolExecutor(max_workers=settings.worker_concurrency)
     tasks: set[asyncio.Task[None]] = set()
     cycle_position = 0
-    await refresh_worker_heartbeat(
-        resources.redis,
-        worker_id,
-        settings.worker_heartbeat_ttl_seconds,
+    heartbeat = asyncio.create_task(
+        maintain_worker_heartbeat(resources, settings, worker_id, shutdown)
     )
-    heartbeat = asyncio.create_task(maintain_worker_heartbeat(resources, settings, worker_id))
+    redis_retry_attempt = 0
     try:
         while not shutdown.is_set():
             if heartbeat.done():
@@ -356,23 +447,41 @@ async def run_worker(shutdown: asyncio.Event) -> None:
             if len(tasks) >= settings.worker_concurrency:
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 continue
-            reservation, cycle_position = await reserve_next_message(
-                resources.redis,
-                worker_id=worker_id,
-                cycle_position=cycle_position,
-            )
+            try:
+                reservation, cycle_position = await reserve_next_message(
+                    resources.redis,
+                    worker_id=worker_id,
+                    cycle_position=cycle_position,
+                )
+            except RedisError as error:
+                delay = retry_delay_seconds(
+                    redis_retry_attempt,
+                    base_ms=settings.redis_retry_base_ms,
+                    cap_ms=settings.redis_retry_cap_ms,
+                )
+                redis_retry_attempt += 1
+                await logger.awarning(
+                    "redis_reconnect_wait",
+                    operation="reserve_job",
+                    delay_seconds=round(delay, 3),
+                    error=str(error),
+                )
+                await wait_for_shutdown(shutdown, delay)
+                continue
+            redis_retry_attempt = 0
             if reservation is None:
                 await wait_for_shutdown(shutdown, settings.worker_poll_interval_ms / 1000)
                 continue
             tasks.add(
                 asyncio.create_task(
-                    handle_reservation(
+                    handle_reservation_with_recovery(
                         resources,
                         settings,
                         reservation,
                         worker_id,
                         thread_pool,
                         process_pool,
+                        shutdown,
                     )
                 )
             )
@@ -381,7 +490,10 @@ async def run_worker(shutdown: asyncio.Event) -> None:
         await asyncio.gather(heartbeat, return_exceptions=True)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await clear_worker_heartbeat(resources.redis, worker_id)
+        try:
+            await clear_worker_heartbeat(resources.redis, worker_id)
+        except RedisError as error:
+            await logger.awarning("worker_heartbeat_cleanup_failed", error=str(error))
         thread_pool.shutdown(wait=True, cancel_futures=True)
         process_pool.shutdown(wait=True, cancel_futures=True)
         await resources.close()

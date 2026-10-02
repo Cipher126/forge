@@ -1,0 +1,178 @@
+name: forge-validation
+
+x-forge-environment: &forge-environment
+  FORGE_ENVIRONMENT: production
+  FORGE_LOG_LEVEL: INFO
+  FORGE_API_HOST: 0.0.0.0
+  FORGE_API_PORT: 8000
+  FORGE_API_WORKERS: 1
+  FORGE_POSTGRES_URL: postgresql+asyncpg://forge:validation-postgres@postgres:5432/forge
+  FORGE_POSTGRES_CONNECT_TIMEOUT_SECONDS: 0.5
+  FORGE_POSTGRES_POOL_TIMEOUT_SECONDS: 1.0
+  FORGE_POSTGRES_RETRY_BASE_MS: 250
+  FORGE_POSTGRES_RETRY_CAP_MS: 5000
+  FORGE_REDIS_URL: redis://redis:6379/0
+  FORGE_REDIS_CONNECT_TIMEOUT_SECONDS: 0.5
+  FORGE_REDIS_OPERATION_TIMEOUT_SECONDS: 1.0
+  FORGE_REDIS_RETRY_BASE_MS: 250
+  FORGE_REDIS_RETRY_CAP_MS: 5000
+  FORGE_OBJECT_STORE_ENDPOINT_URL: http://object-store:8333
+  FORGE_OBJECT_STORE_ACCESS_KEY: forge-validation
+  FORGE_OBJECT_STORE_SECRET_KEY: validation-object-secret
+  FORGE_OBJECT_STORE_BUCKET: forge-validation
+  FORGE_OBJECT_STORE_CONNECT_TIMEOUT_SECONDS: 0.5
+  FORGE_OBJECT_STORE_READ_TIMEOUT_SECONDS: 1.0
+  FORGE_OBJECT_STORE_MAX_ATTEMPTS: 2
+  FORGE_OBJECT_STORE_OPERATION_TIMEOUT_SECONDS: 3.0
+  FORGE_API_KEY_PEPPER: validation-api-key-pepper
+  FORGE_WORKER_CONCURRENCY: 4
+  FORGE_JOB_TYPE_CONCURRENCY_LIMITS: '{"demo.generate_report":4}'
+
+x-forge-process: &forge-process
+  image: forge:validation
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  environment: *forge-environment
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-api: &api
+  <<: *forge-process
+  command: ["forge-api"]
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    object-store:
+      condition: service_started
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)",
+      ]
+    interval: 5s
+    timeout: 4s
+    retries: 20
+    start_period: 10s
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: forge
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: validation-postgres
+    volumes:
+      - validation-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge -d forge"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8.10-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - validation-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  object-store:
+    image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command: ["server", "-s3", "-dir=/data", "-s3.port=8333"]
+    environment:
+      AWS_ACCESS_KEY_ID: forge-validation
+      AWS_SECRET_ACCESS_KEY: validation-object-secret
+    volumes:
+      - validation-objects:/data
+
+  migrate:
+    <<: *forge-process
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api-1:
+    <<: *api
+
+  api-2:
+    <<: *api
+
+  proxy:
+    image: nginx:1.31.6-alpine3.24-slim
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./nginx.validation.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dispatcher:
+    <<: *forge-process
+    command: ["forge-dispatcher"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker-1:
+    <<: *forge-process
+    command: ["forge-worker"]
+    stop_grace_period: 2m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker-2:
+    <<: *forge-process
+    command: ["forge-worker"]
+    stop_grace_period: 2m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    <<: *forge-process
+    command: ["forge-scheduler"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  recovery:
+    <<: *forge-process
+    command: ["forge-recovery"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  validation-postgres:
+  validation-redis:
+  validation-objects:

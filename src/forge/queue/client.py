@@ -41,8 +41,18 @@ return 0
 """
 
 
-def create_redis_client(url: str) -> Redis:
-    return Redis.from_url(url, decode_responses=True)
+def create_redis_client(
+    url: str,
+    *,
+    connect_timeout_seconds: float = 0.5,
+    operation_timeout_seconds: float = 1.0,
+) -> Redis:
+    return Redis.from_url(
+        url,
+        decode_responses=True,
+        socket_connect_timeout=connect_timeout_seconds,
+        socket_timeout=operation_timeout_seconds,
+    )
 
 
 async def probe_redis(client: Redis) -> bool:

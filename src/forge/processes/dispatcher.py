@@ -1,6 +1,7 @@
 import asyncio
 
 import structlog
+from sqlalchemy.exc import DBAPIError
 
 from forge.application.outbox import (
     claim_outbox_events,
@@ -11,7 +12,7 @@ from forge.application.outbox import (
 from forge.config import Settings, get_settings
 from forge.errors.outbox import OutboxClaimLostError, OutboxPublishError
 from forge.observability.logging import configure_logging
-from forge.processes.lifecycle import run_process, wait_for_shutdown
+from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
 from forge.resources import RuntimeResources
 
 logger = structlog.get_logger()
@@ -67,9 +68,27 @@ async def run_dispatcher(shutdown: asyncio.Event) -> None:
     settings = get_settings()
     configure_logging(settings.log_level, service="dispatcher")
     resources = RuntimeResources.create(settings)
+    database_retry_attempt = 0
     try:
         while not shutdown.is_set():
-            dispatched = await dispatch_once(resources, settings)
+            try:
+                dispatched = await dispatch_once(resources, settings)
+            except (DBAPIError, OSError) as error:
+                delay = retry_delay_seconds(
+                    database_retry_attempt,
+                    base_ms=settings.postgres_retry_base_ms,
+                    cap_ms=settings.postgres_retry_cap_ms,
+                )
+                database_retry_attempt += 1
+                await logger.awarning(
+                    "database_reconnect_wait",
+                    operation="dispatch_outbox",
+                    delay_seconds=round(delay, 3),
+                    error=str(error),
+                )
+                await wait_for_shutdown(shutdown, delay)
+                continue
+            database_retry_attempt = 0
             if dispatched == 0:
                 await wait_for_shutdown(shutdown, settings.dispatcher_poll_interval_ms / 1000)
     finally:

@@ -12,6 +12,7 @@ from forge.errors.execution import (
     PermanentHandlerError,
     TemporaryHandlerError,
 )
+from forge.errors.object_store import ObjectStoreUnavailableError
 from forge.queue.names import PRIORITY_CYCLE
 from forge.schemas.execution import ReservedQueueMessage
 
@@ -52,4 +53,9 @@ def test_handler_failures_have_explicit_retry_policy() -> None:
     assert classify_handler_failure(RuntimeError("bug"))[:2] == (
         FailureKind.TEMPORARY,
         True,
+    )
+    assert classify_handler_failure(ObjectStoreUnavailableError("offline")) == (
+        FailureKind.TEMPORARY,
+        True,
+        "object_store_unavailable",
     )

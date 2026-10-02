@@ -1,14 +1,18 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
-from botocore.exceptions import ClientError  # type: ignore[import-untyped]
+from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
+
+from forge.errors.object_store import ObjectStoreUnavailableError
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +29,10 @@ class ObjectStore:
         access_key: str,
         secret_key: str,
         bucket: str,
+        connect_timeout_seconds: float = 0.5,
+        read_timeout_seconds: float = 1.0,
+        max_attempts: int = 2,
+        operation_timeout_seconds: float = 3.0,
     ) -> None:
         self.bucket = bucket
         self._client: Any = boto3.client(
@@ -33,10 +41,29 @@ class ObjectStore:
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name="us-east-1",
-            config=Config(s3={"addressing_style": "path"}),
+            config=Config(
+                connect_timeout=connect_timeout_seconds,
+                read_timeout=read_timeout_seconds,
+                retries={"max_attempts": max_attempts, "mode": "standard"},
+                s3={"addressing_style": "path"},
+            ),
         )
         self._ready = False
         self._ready_lock = asyncio.Lock()
+        self._operation_timeout_seconds = operation_timeout_seconds
+
+    async def _call(self, function: Callable[..., T], **kwargs: Any) -> T:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(function, **kwargs),
+                timeout=self._operation_timeout_seconds,
+            )
+        except TimeoutError as error:
+            raise ObjectStoreUnavailableError(
+                f"object-store operation exceeded {self._operation_timeout_seconds:g} seconds"
+            ) from error
+        except BotoCoreError as error:
+            raise ObjectStoreUnavailableError("object-store operation failed") from error
 
     async def ensure_bucket(self) -> None:
         if self._ready:
@@ -45,13 +72,13 @@ class ObjectStore:
             if self._ready:
                 return
             try:
-                await asyncio.to_thread(self._client.head_bucket, Bucket=self.bucket)
+                await self._call(self._client.head_bucket, Bucket=self.bucket)
             except ClientError as error:
                 code = error.response.get("Error", {}).get("Code")
                 if code not in {"404", "NoSuchBucket", "NotFound"}:
                     raise
                 try:
-                    await asyncio.to_thread(self._client.create_bucket, Bucket=self.bucket)
+                    await self._call(self._client.create_bucket, Bucket=self.bucket)
                 except ClientError as create_error:
                     create_code = create_error.response.get("Error", {}).get("Code")
                     if create_code not in {"BucketAlreadyExists", "BucketAlreadyOwnedByYou"}:
@@ -84,7 +111,7 @@ class ObjectStore:
         await self._put_json_body(key, body)
 
     async def _put_json_body(self, key: str, body: bytes) -> None:
-        await asyncio.to_thread(
+        await self._call(
             self._client.put_object,
             Bucket=self.bucket,
             Key=key,
@@ -94,12 +121,12 @@ class ObjectStore:
 
     async def get_json(self, key: str) -> dict[str, Any]:
         await self.ensure_bucket()
-        response = await asyncio.to_thread(
+        response = await self._call(
             self._client.get_object,
             Bucket=self.bucket,
             Key=key,
         )
-        body = await asyncio.to_thread(response["Body"].read)
+        body = await self._call(response["Body"].read)
         value = json.loads(body)
         if not isinstance(value, dict):
             raise ValueError(f"object {key!r} does not contain a JSON object")
@@ -107,7 +134,7 @@ class ObjectStore:
 
     async def delete(self, key: str) -> None:
         await self.ensure_bucket()
-        await asyncio.to_thread(self._client.delete_object, Bucket=self.bucket, Key=key)
+        await self._call(self._client.delete_object, Bucket=self.bucket, Key=key)
 
     async def list_objects(self, prefix: str) -> list[StoredObject]:
         await self.ensure_bucket()
@@ -122,7 +149,7 @@ class ObjectStore:
                 )
             return objects
 
-        return await asyncio.to_thread(list_all)
+        return await self._call(list_all)
 
     async def probe(self) -> bool:
         try:

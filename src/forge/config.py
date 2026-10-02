@@ -25,13 +25,24 @@ class Settings(BaseSettings):
     postgres_url: str = "postgresql+asyncpg://forge:forge@127.0.0.1:54321/forge"
     postgres_pool_size: int = Field(default=5, ge=1, le=100)
     postgres_max_overflow: int = Field(default=5, ge=0, le=100)
-    postgres_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    postgres_connect_timeout_seconds: float = Field(default=0.5, gt=0, le=60)
+    postgres_pool_timeout_seconds: float = Field(default=1.0, gt=0, le=300)
     postgres_pool_recycle_seconds: int = Field(default=1800, ge=30)
+    postgres_retry_base_ms: int = Field(default=250, ge=1, le=60_000)
+    postgres_retry_cap_ms: int = Field(default=5000, ge=1, le=300_000)
     redis_url: str = "redis://127.0.0.1:56379/0"
+    redis_connect_timeout_seconds: float = Field(default=0.5, gt=0, le=60)
+    redis_operation_timeout_seconds: float = Field(default=1.0, gt=0, le=60)
+    redis_retry_base_ms: int = Field(default=250, ge=1, le=60_000)
+    redis_retry_cap_ms: int = Field(default=5000, ge=1, le=300_000)
     object_store_endpoint_url: str = "http://127.0.0.1:59000"
     object_store_access_key: str = "forge"
     object_store_secret_key: SecretStr = SecretStr("development-only-change-me")
     object_store_bucket: str = "forge-jobs"
+    object_store_connect_timeout_seconds: float = Field(default=0.5, gt=0, le=60)
+    object_store_read_timeout_seconds: float = Field(default=1.0, gt=0, le=300)
+    object_store_max_attempts: int = Field(default=2, ge=1, le=10)
+    object_store_operation_timeout_seconds: float = Field(default=3.0, gt=0, le=300)
     api_key_pepper: SecretStr = SecretStr("development-only-change-me")
     dispatcher_batch_size: int = Field(default=100, ge=1, le=1000)
     dispatcher_lease_seconds: int = Field(default=30, ge=1)
@@ -75,6 +86,8 @@ class Settings(BaseSettings):
             raise ValueError("job-type concurrency limits require a name and positive limit")
         if self.job_type_permit_renew_interval_seconds >= self.job_type_permit_lease_seconds:
             raise ValueError("job-type permit renewal interval must be shorter than its lease")
+        if self.redis_retry_base_ms > self.redis_retry_cap_ms:
+            raise ValueError("Redis retry base must not exceed its cap")
         if (
             self.environment == "production"
             and self.api_key_pepper.get_secret_value() == "development-only-change-me"

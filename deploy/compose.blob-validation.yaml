@@ -1,0 +1,13 @@
+services:
+  api-1:
+    environment:
+      FORGE_MAX_INLINE_PAYLOAD_BYTES: ${FORGE_BLOB_TEST_INLINE_BYTES:-1}
+  api-2:
+    environment:
+      FORGE_MAX_INLINE_PAYLOAD_BYTES: ${FORGE_BLOB_TEST_INLINE_BYTES:-1}
+  worker-1:
+    environment:
+      FORGE_MAX_INLINE_PAYLOAD_BYTES: ${FORGE_BLOB_TEST_INLINE_BYTES:-1}
+  worker-2:
+    environment:
+      FORGE_MAX_INLINE_PAYLOAD_BYTES: ${FORGE_BLOB_TEST_INLINE_BYTES:-1}

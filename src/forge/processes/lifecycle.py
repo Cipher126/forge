@@ -1,4 +1,5 @@
 import asyncio
+import random
 import signal
 from collections.abc import Awaitable, Callable
 from types import FrameType
@@ -26,6 +27,13 @@ async def wait_for_shutdown(shutdown: asyncio.Event, timeout_seconds: float) -> 
     except TimeoutError:
         return False
     return True
+
+
+def retry_delay_seconds(attempt: int, *, base_ms: int, cap_ms: int) -> float:
+    """Return equal-jitter exponential backoff for a zero-based retry attempt."""
+    maximum_exponent = max(0, (cap_ms // base_ms).bit_length())
+    ceiling_ms = min(cap_ms, base_ms * (2 ** min(attempt, maximum_exponent)))
+    return random.uniform(ceiling_ms / 2, ceiling_ms) / 1000
 
 
 async def run_process(process: Callable[[asyncio.Event], Awaitable[None]]) -> None:

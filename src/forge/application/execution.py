@@ -26,6 +26,7 @@ from forge.errors.execution import (
     PermanentHandlerError,
     TemporaryHandlerError,
 )
+from forge.errors.object_store import ObjectStoreUnavailableError
 from forge.persistence.models import Job, JobAttempt, JobTransition
 from forge.schemas.execution import ClaimedJob, LeaseRenewalOutcome, ReservedQueueMessage
 from forge.schemas.outbox import QueueMessage
@@ -186,6 +187,8 @@ def classify_handler_failure(error: BaseException) -> tuple[FailureKind, bool, s
         return FailureKind.TEMPORARY, True, "temporary_handler_error"
     if isinstance(error, JobTypePermitLostError):
         return FailureKind.TEMPORARY, True, "capacity_permit_lost"
+    if isinstance(error, ObjectStoreUnavailableError):
+        return FailureKind.TEMPORARY, True, "object_store_unavailable"
     return FailureKind.TEMPORARY, True, "unexpected_handler_error"
 
 
@@ -208,6 +211,11 @@ async def complete_attempt_failure(
     attempt.retryable = retryable
     attempt.updated_at = database_now
     job.active_attempt_id = None
+
+    # Infrastructure attempts remain visible in the audit trail but do not consume
+    # the handler retry budget chosen by the submitter.
+    if error_code == "object_store_unavailable":
+        job.max_attempts += 1
 
     if failure_kind is FailureKind.CANCELLED:
         next_status = JobStatus.CANCELLED

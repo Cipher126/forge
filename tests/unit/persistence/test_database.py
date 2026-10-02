@@ -18,6 +18,7 @@ def test_database_engine_applies_pool_limits(monkeypatch: Any) -> None:
         "postgresql+asyncpg://forge:test@postgres/forge",
         pool_size=7,
         max_overflow=3,
+        connect_timeout_seconds=0.75,
         pool_timeout_seconds=12,
         pool_recycle_seconds=600,
     )
@@ -25,6 +26,7 @@ def test_database_engine_applies_pool_limits(monkeypatch: Any) -> None:
     assert engine is sentinel
     assert captured == {
         "url": "postgresql+asyncpg://forge:test@postgres/forge",
+        "connect_args": {"timeout": 0.75},
         "pool_pre_ping": True,
         "pool_size": 7,
         "max_overflow": 3,

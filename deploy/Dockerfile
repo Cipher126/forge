@@ -19,6 +19,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
+COPY scripts/check_startup.py scripts/validate_integrity.py ./scripts/
 RUN uv sync --frozen --no-dev \
     && chown -R forge:forge /app
 

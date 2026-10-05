@@ -6,6 +6,7 @@ x-forge-environment: &forge-environment
   FORGE_API_HOST: 0.0.0.0
   FORGE_API_PORT: 8000
   FORGE_API_WORKERS: 1
+  FORGE_API_SUBMISSION_CONCURRENCY_LIMIT: 6
   FORGE_POSTGRES_URL: postgresql+asyncpg://forge:validation-postgres@postgres:5432/forge
   FORGE_POSTGRES_CONNECT_TIMEOUT_SECONDS: 0.5
   FORGE_POSTGRES_POOL_TIMEOUT_SECONDS: 1.0

@@ -1,0 +1,90 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [{"expr": "sum(forge_jobs)", "refId": "A"}],
+      "title": "Durable jobs",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "targets": [{"expr": "forge_job_failure_ratio", "refId": "A"}],
+      "title": "Failure ratio (5m)",
+      "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+      "id": 3,
+      "targets": [{"expr": "forge_dead_letter_jobs", "refId": "A"}],
+      "title": "Dead-letter jobs",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "id": 4,
+      "targets": [
+        {"expr": "forge_jobs_enqueued_rate_per_minute", "legendFormat": "enqueued/min", "refId": "A"},
+        {"expr": "forge_jobs_completed_rate_per_minute", "legendFormat": "completed/min", "refId": "B"}
+      ],
+      "title": "Job flow rates",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "id": 5,
+      "targets": [
+        {"expr": "forge_queue_messages", "legendFormat": "{{priority}}", "refId": "A"},
+        {"expr": "forge_processing_messages", "legendFormat": "processing", "refId": "B"}
+      ],
+      "title": "Redis queue depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "id": 6,
+      "targets": [
+        {"expr": "forge_job_type_permit_utilization_ratio", "legendFormat": "{{job_type}}", "refId": "A"}
+      ],
+      "title": "Job-type permit utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "forge-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "id": 7,
+      "targets": [
+        {"expr": "forge_workers_online", "legendFormat": "workers", "refId": "A"},
+        {"expr": "forge_attempts_running", "legendFormat": "running attempts", "refId": "B"},
+        {"expr": "forge_attempt_leases_expired", "legendFormat": "expired leases", "refId": "C"}
+      ],
+      "title": "Worker health",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 42,
+  "tags": ["forge"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "Forge Overview",
+  "uid": "forge-overview",
+  "version": 1
+}

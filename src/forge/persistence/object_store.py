@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import hashlib
 import json
 from collections.abc import Callable, Mapping
@@ -13,6 +14,16 @@ from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[impor
 from forge.errors.object_store import ObjectStoreUnavailableError
 
 T = TypeVar("T")
+
+
+def _encode_json(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,13 +98,7 @@ class ObjectStore:
 
     async def put_json(self, namespace: str, value: Mapping[str, Any]) -> str:
         await self.ensure_bucket()
-        body = json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        body = _encode_json(value)
         digest = hashlib.sha256(body).hexdigest()
         key = f"{namespace}/{digest}.json"
         await self._put_json_body(key, body)
@@ -101,14 +106,20 @@ class ObjectStore:
 
     async def put_json_at(self, key: str, value: Mapping[str, Any]) -> None:
         await self.ensure_bucket()
-        body = json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
+        body = _encode_json(value)
         await self._put_json_body(key, body)
+
+    async def put_json_gzip_at(self, key: str, value: Mapping[str, Any]) -> None:
+        await self.ensure_bucket()
+        body = gzip.compress(_encode_json(value), compresslevel=6, mtime=0)
+        await self._call(
+            self._client.put_object,
+            Bucket=self.bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            ContentEncoding="gzip",
+        )
 
     async def _put_json_body(self, key: str, body: bytes) -> None:
         await self._call(
@@ -128,6 +139,19 @@ class ObjectStore:
         )
         body = await self._call(response["Body"].read)
         value = json.loads(body)
+        if not isinstance(value, dict):
+            raise ValueError(f"object {key!r} does not contain a JSON object")
+        return cast(dict[str, Any], value)
+
+    async def get_json_gzip(self, key: str) -> dict[str, Any]:
+        await self.ensure_bucket()
+        response = await self._call(
+            self._client.get_object,
+            Bucket=self.bucket,
+            Key=key,
+        )
+        body = await self._call(response["Body"].read)
+        value = json.loads(gzip.decompress(body))
         if not isinstance(value, dict):
             raise ValueError(f"object {key!r} does not contain a JSON object")
         return cast(dict[str, Any], value)

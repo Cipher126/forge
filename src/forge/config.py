@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
     api_workers: int = Field(default=1, ge=1, le=32)
+    api_submission_concurrency_limit: int = Field(default=6, ge=1, le=100)
     max_request_body_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
     max_inline_payload_bytes: int = Field(default=256 * 1024, ge=1)
     postgres_url: str = "postgresql+asyncpg://forge:forge@127.0.0.1:54321/forge"
@@ -55,6 +56,7 @@ class Settings(BaseSettings):
     worker_retry_cap_ms: int = Field(default=60_000, ge=1)
     worker_concurrency: int = Field(default=4, ge=1, le=256)
     worker_poll_interval_ms: int = Field(default=100, ge=10)
+    worker_drain_timeout_seconds: float = Field(default=90.0, gt=0, le=3600)
     job_type_concurrency_limits: dict[str, int] = Field(
         default_factory=lambda: {"demo.generate_report": 2}
     )
@@ -69,7 +71,9 @@ class Settings(BaseSettings):
     delivery_reconciliation_interval_seconds: int = Field(default=30, ge=1)
     maintenance_interval_seconds: int = Field(default=3600, ge=1)
     maintenance_batch_size: int = Field(default=100, ge=1, le=1000)
-    job_retention_days: int = Field(default=30, ge=1)
+    idempotency_retention_hours: int = Field(default=24, ge=1)
+    successful_job_retention_days: int = Field(default=30, ge=1)
+    failed_job_retention_days: int = Field(default=90, ge=1)
     orphan_object_grace_hours: int = Field(default=24, ge=0)
     operational_stream_poll_ms: int = Field(default=1000, ge=100, le=10_000)
     worker_heartbeat_interval_seconds: int = Field(default=5, ge=1)
@@ -86,8 +90,18 @@ class Settings(BaseSettings):
             raise ValueError("job-type concurrency limits require a name and positive limit")
         if self.job_type_permit_renew_interval_seconds >= self.job_type_permit_lease_seconds:
             raise ValueError("job-type permit renewal interval must be shorter than its lease")
+        if self.api_submission_concurrency_limit > (
+            self.postgres_pool_size + self.postgres_max_overflow
+        ):
+            raise ValueError(
+                "API submission concurrency limit cannot exceed PostgreSQL pool capacity"
+            )
         if self.redis_retry_base_ms > self.redis_retry_cap_ms:
             raise ValueError("Redis retry base must not exceed its cap")
+        if self.failed_job_retention_days < self.successful_job_retention_days:
+            raise ValueError(
+                "failed-job retention must be at least as long as successful-job retention"
+            )
         if (
             self.environment == "production"
             and self.api_key_pepper.get_secret_value() == "development-only-change-me"

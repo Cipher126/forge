@@ -234,3 +234,21 @@ threshold. The object store was removed for eight seconds while workers ran:
 Object-store calls now have bounded SDK network settings plus a three-second
 application deadline, covering DNS stalls that socket timeouts alone cannot
 bound.
+
+## Worker drain deadline recovery
+
+A validation override reduced the worker drain deadline to two seconds and the
+attempt lease to six seconds. An eight-second `demo.wait` job was claimed, then
+the owning worker received `SIGTERM`:
+
+- the worker stopped accepting reservations immediately;
+- it kept its heartbeat and attempt renewal active during the drain window;
+- it logged `worker_drain_deadline_exceeded` and exited after 2.49 seconds;
+- attempt 1 became `abandoned` with failure kind `worker_lost` after lease expiry;
+- attempt 2 ran on the other worker and reached `succeeded`;
+- the stopped worker was restored; and
+- every integrity check returned zero.
+
+The normal profile uses a 90-second drain deadline and a two-minute container
+grace period. `deploy/compose.drain-validation.yaml` shortens the timings only
+for this recovery experiment.

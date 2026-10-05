@@ -1,5 +1,6 @@
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from uuid import uuid7
 
@@ -23,6 +24,7 @@ from forge.config import get_settings
 from forge.errors.execution import AttemptOwnershipLostError, HandlerCancelledError
 from forge.handlers.registry import create_handler_registry
 from forge.persistence.models import ApiKey, Job, JobAttempt, JobTransition
+from forge.processes.worker import handle_reservation
 from forge.queue.client import acknowledge_message, reserve_next_message
 from forge.queue.names import processing_queue_key, queue_key
 from forge.resources import RuntimeResources
@@ -37,6 +39,93 @@ pytestmark = [
         reason="set FORGE_RUN_INTEGRATION=1 to use local Forge services",
     ),
 ]
+
+
+async def test_unsupported_handler_version_fails_without_retry() -> None:
+    settings = get_settings()
+    resources = RuntimeResources.create(settings)
+    worker_id = "unsupported-version-worker"
+    processing = processing_queue_key(worker_id)
+    async with resources.sessions.begin() as session:
+        issued = await issue_api_key(
+            session,
+            name="unsupported handler version owner",
+            scopes={"jobs:write"},
+            pepper=settings.api_key_pepper.get_secret_value(),
+        )
+        job = Job(
+            id=uuid7(),
+            api_key_id=issued.record.id,
+            job_type="demo.generate_report",
+            handler_version="retired-v0",
+            status="queued",
+            priority="normal",
+            payload={"report_id": "unsupported", "format": "pdf"},
+            max_attempts=3,
+            attempt_count=0,
+        )
+        session.add(job)
+        await session.flush()
+
+    raw = QueueMessage(
+        event_id=uuid7(),
+        job_id=job.id,
+        job_type=job.job_type,
+        handler_version=job.handler_version,
+        priority="normal",
+    ).model_dump_json()
+    reservation = ReservedQueueMessage(
+        raw=raw,
+        source_queue=queue_key("normal"),
+        processing_queue=processing,
+    )
+    await resources.redis.rpush(processing, raw)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as thread_pool:
+            await handle_reservation(
+                resources,
+                settings,
+                reservation,
+                worker_id,
+                thread_pool,
+                thread_pool,
+            )
+
+        async with resources.sessions() as session:
+            failed_job = await session.get(Job, job.id)
+            attempt = await session.scalar(
+                select(JobAttempt).where(JobAttempt.job_id == job.id)
+            )
+            transition = await session.scalar(
+                select(JobTransition)
+                .where(
+                    JobTransition.job_id == job.id,
+                    JobTransition.reason == "permanent_failure",
+                )
+                .order_by(JobTransition.id.desc())
+            )
+            assert failed_job is not None
+            assert attempt is not None
+            assert transition is not None
+            assert failed_job.status == "failed"
+            assert failed_job.attempt_count == 1
+            assert failed_job.active_attempt_id is None
+            assert attempt.status == "failed"
+            assert attempt.failure_kind == "permanent"
+            assert attempt.retryable is False
+            assert attempt.error_code == "handler_version_unsupported"
+            assert transition.details == {
+                "failure_kind": "permanent",
+                "error_code": "handler_version_unsupported",
+            }
+            assert await resources.redis.llen(processing) == 0
+    finally:
+        await resources.redis.delete(processing)
+        async with resources.sessions.begin() as session:
+            await session.execute(delete(Job).where(Job.id == job.id))
+            await session.execute(delete(ApiKey).where(ApiKey.id == issued.record.id))
+        await resources.close()
 
 
 async def test_duplicate_messages_create_one_attempt_owner() -> None:

@@ -13,9 +13,10 @@ RUN groupadd --system --gid 10001 forge \
 
 WORKDIR /app
 COPY --from=uv /uv /uvx /bin/
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY README.md ./
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./

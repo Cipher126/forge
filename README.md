@@ -75,6 +75,14 @@ header when the durable outstanding backlog reaches
 `FORGE_ADMISSION_BACKLOG_LIMIT`. An idempotent retry of an already accepted job
 still returns that job while admission is closed.
 
+Each API process also admits at most
+`FORGE_API_SUBMISSION_CONCURRENCY_LIMIT` simultaneous submission or replay
+requests before authentication performs a database lookup. Excess requests
+receive `503 submission_capacity_exceeded` with `Retry-After`; clients can retry
+them because Forge has not accepted a job. The default is six against a
+ten-connection API pool, leaving four connections available for health, status,
+and administrative requests.
+
 Every authenticated endpoint also applies the request limit stored on its API
 key. Successful responses include `X-RateLimit-Limit` and
 `X-RateLimit-Remaining`; exhausted keys receive `429 rate_limit_exceeded` with
@@ -107,8 +115,12 @@ safe because the database attempt claim permits only one current owner.
 
 Dispatcher, scheduler, worker, recovery, and maintenance processes handle
 `SIGINT` and `SIGTERM`. They stop accepting new work, finish their current
-database operation, and close connections; workers keep their heartbeat while
-draining already claimed jobs.
+database operation, and close connections. Workers keep their heartbeat and
+attempt leases while draining already claimed jobs for up to
+`FORGE_WORKER_DRAIN_TIMEOUT_SECONDS`. At the deadline, local job tasks are
+cancelled and lease renewal stops so recovery can safely retry unfinished work.
+The container grace period should be longer than this deadline so the runtime
+has time to release permits and close connections.
 
 All entry points emit JSON logs. Fields named for credentials, secrets, tokens,
 payloads, or results are recursively redacted, and API-key or Bearer values
@@ -116,17 +128,21 @@ embedded in text are masked. Temporary PostgreSQL, Redis, and object-store
 client failures return `503 dependency_unavailable` without exposing connection
 details.
 
-Run maintenance to remove expired idempotency records, archive terminal jobs
-older than `FORGE_JOB_RETENTION_DAYS`, and delete unreferenced payload/result
-objects after `FORGE_ORPHAN_OBJECT_GRACE_HOURS`:
+Run maintenance to remove idempotency records after
+`FORGE_IDEMPOTENCY_RETENTION_HOURS`, archive successful/cancelled jobs after
+`FORGE_SUCCESSFUL_JOB_RETENTION_DAYS`, archive failed/dead-lettered jobs after
+`FORGE_FAILED_JOB_RETENTION_DAYS`, and delete unreferenced payload/result objects
+after `FORGE_ORPHAN_OBJECT_GRACE_HOURS`:
 
 ```powershell
 uv run forge-maintenance
 ```
 
-Archives are stored at `archives/jobs/<job-id>.json` with the job, its attempts,
-and its transition history. Jobs that are still referenced as replay sources are
-retained until those references no longer exist.
+Archives are stored as gzip-compressed JSON at
+`archives/jobs/<job-id>.json.gz` with the job, its attempts, and its transition
+history. The database row is deleted only after the archive upload succeeds.
+Jobs that are still referenced as replay sources are retained until those
+references no longer exist.
 
 The public liveness endpoint is available at `GET /health`; `GET /ready` checks
 PostgreSQL, Redis, and the object store.
@@ -204,8 +220,9 @@ endpoints:
 - `GET /v1/admin/operations/performance?window_minutes=60` reports throughput,
   outcomes, retries, and p50/p95 queue-wait, execution-time, and scheduling-lag
   distributions for a bounded time window.
-- `GET /v1/admin/operations/metrics` exposes low-cardinality Prometheus text
-  gauges and requires the same administrator authentication.
+- `GET /v1/admin/operations/metrics` exposes authenticated, low-cardinality
+  Prometheus gauges for durable state, queues, worker health, five-minute job
+  rates and failure ratio, dead-letter volume, and job-type permit utilization.
 - `GET /v1/admin/operations/events` streams job transitions as authenticated
   server-sent events. Pass `after=<transition-id>` to resume after a disconnect.
 
@@ -218,6 +235,19 @@ Set `FORGE_OTLP_TRACING_ENABLED=true` and configure
 `FORGE_OTLP_TRACES_ENDPOINT` to export batched API and worker spans over OTLP
 HTTP. Sampling is controlled by `FORGE_TRACE_SAMPLE_RATIO`; tracing remains off
 by default.
+
+Run `uv run python scripts/start_observability.py` to start the validation
+topology with Prometheus, a provisioned Forge dashboard in Grafana, and Tempo.
+The script creates a dedicated local scrape credential without committing it.
+See [the observability guide](docs/observability.md) for endpoints, metric
+semantics, token rotation, and shutdown commands.
+
+Run `uv run python scripts/validate_deployment.py` for the complete local
+deployment acceptance check. It starts the topology, creates and later revokes a
+temporary load-test key, runs the measured k6 workload, waits for every accepted
+job, and verifies services, queues, startup dependencies, and database
+integrity. See [the deployment-validation guide](docs/deployment-validation.md)
+for its pass criteria, report locations, and configuration options.
 
 After migrations, `uv run python scripts/check_startup.py` verifies the Alembic
 head, PostgreSQL, Redis, object storage, and handler registry. Capture real query

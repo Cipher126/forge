@@ -1,6 +1,21 @@
+from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import BaseModel
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalRates:
+    window_minutes: int
+    enqueued_per_minute: float
+    completed_per_minute: float
+    failure_ratio: float
+
+
+@dataclass(frozen=True, slots=True)
+class JobTypePermitUsage:
+    used: int
+    limit: int
 
 
 class QueueStatistics(BaseModel):

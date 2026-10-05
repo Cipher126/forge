@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -7,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.jobs import TERMINAL_JOB_STATUSES, JobStatus
 from forge.persistence.models import Job, JobAttempt, JobTransition, OutboxEvent
-from forge.queue.names import PRIORITY_CYCLE, queue_key
+from forge.queue.names import PRIORITY_CYCLE, job_type_permits_key, queue_key
 from forge.schemas.operations import (
     DurationDistribution,
+    JobTypePermitUsage,
+    OperationalRates,
     PerformanceStatistics,
     QueueStatistics,
     WorkerHealth,
@@ -18,6 +21,7 @@ from forge.schemas.operations import (
 HEARTBEAT_PREFIX = "forge:worker:"
 HEARTBEAT_SUFFIX = ":heartbeat"
 PROCESSING_PREFIX = "forge:processing:"
+METRICS_RATE_WINDOW_MINUTES = 5
 
 
 async def database_now(session: AsyncSession) -> datetime:
@@ -132,6 +136,8 @@ def render_prometheus_metrics(
     queues: QueueStatistics,
     active_workers: int,
     process_metrics: dict[str, int],
+    rates: OperationalRates,
+    permit_usage: dict[str, JobTypePermitUsage],
 ) -> str:
     lines = [
         "# HELP forge_jobs Current durable jobs by status.",
@@ -164,8 +170,90 @@ def render_prometheus_metrics(
         "# HELP forge_attempt_leases_expired Running attempts with expired leases.",
         "# TYPE forge_attempt_leases_expired gauge",
         f"forge_attempt_leases_expired {process_metrics['attempt_leases_expired']}",
+        "# HELP forge_jobs_enqueued_rate_per_minute "
+        "Jobs entering a runnable queue per minute over the metrics window.",
+        "# TYPE forge_jobs_enqueued_rate_per_minute gauge",
+        f"forge_jobs_enqueued_rate_per_minute {rates.enqueued_per_minute}",
+        "# HELP forge_jobs_completed_rate_per_minute "
+        "Jobs entering a terminal state per minute over the metrics window.",
+        "# TYPE forge_jobs_completed_rate_per_minute gauge",
+        f"forge_jobs_completed_rate_per_minute {rates.completed_per_minute}",
+        "# HELP forge_job_failure_ratio Failed or dead-lettered completions divided by "
+        "non-cancelled completions over the metrics window.",
+        "# TYPE forge_job_failure_ratio gauge",
+        f"forge_job_failure_ratio {rates.failure_ratio}",
+        "# HELP forge_metrics_rate_window_minutes Window used for Forge rate and ratio metrics.",
+        "# TYPE forge_metrics_rate_window_minutes gauge",
+        f"forge_metrics_rate_window_minutes {rates.window_minutes}",
+        "# HELP forge_dead_letter_jobs Current durable jobs in the dead-letter state.",
+        "# TYPE forge_dead_letter_jobs gauge",
+        f"forge_dead_letter_jobs {counts[JobStatus.DEAD_LETTERED.value]}",
+        "# HELP forge_job_type_permits_used Active concurrency permits by configured job type.",
+        "# TYPE forge_job_type_permits_used gauge",
+        *(
+            f'forge_job_type_permits_used{{job_type="{_prometheus_label(job_type)}"}} {usage.used}'
+            for job_type, usage in sorted(permit_usage.items())
+        ),
+        "# HELP forge_job_type_permits_limit Configured concurrency permit limit by job type.",
+        "# TYPE forge_job_type_permits_limit gauge",
+        *(
+            "forge_job_type_permits_limit"
+            f'{{job_type="{_prometheus_label(job_type)}"}} {usage.limit}'
+            for job_type, usage in sorted(permit_usage.items())
+        ),
+        "# HELP forge_job_type_permit_utilization_ratio "
+        "Active permits divided by the configured limit.",
+        "# TYPE forge_job_type_permit_utilization_ratio gauge",
+        *(
+            "forge_job_type_permit_utilization_ratio"
+            f'{{job_type="{_prometheus_label(job_type)}"}} {usage.used / usage.limit}'
+            for job_type, usage in sorted(permit_usage.items())
+        ),
     ]
     return "\n".join(lines) + "\n"
+
+
+def _prometheus_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+async def operational_rates(
+    session: AsyncSession,
+    *,
+    window_minutes: int = METRICS_RATE_WINDOW_MINUTES,
+) -> OperationalRates:
+    cutoff = await database_now(session) - timedelta(minutes=window_minutes)
+    rows = await session.execute(
+        select(JobTransition.to_status, func.count())
+        .where(JobTransition.created_at >= cutoff)
+        .group_by(JobTransition.to_status)
+    )
+    counts = {status: int(count) for status, count in rows.tuples()}
+    enqueued = counts.get(JobStatus.QUEUED.value, 0)
+    completed = sum(counts.get(status.value, 0) for status in TERMINAL_JOB_STATUSES)
+    failed = counts.get(JobStatus.FAILED.value, 0) + counts.get(
+        JobStatus.DEAD_LETTERED.value, 0
+    )
+    non_cancelled = completed - counts.get(JobStatus.CANCELLED.value, 0)
+    return OperationalRates(
+        window_minutes=window_minutes,
+        enqueued_per_minute=enqueued / window_minutes,
+        completed_per_minute=completed / window_minutes,
+        failure_ratio=failed / non_cancelled if non_cancelled else 0.0,
+    )
+
+
+async def job_type_permit_usage(
+    redis: Redis,
+    limits: dict[str, int],
+) -> dict[str, JobTypePermitUsage]:
+    seconds, microseconds = await redis.time()
+    now = math.fsum((float(seconds), float(microseconds) / 1_000_000))
+    usage: dict[str, JobTypePermitUsage] = {}
+    for job_type, limit in limits.items():
+        used = int(await redis.zcount(job_type_permits_key(job_type), f"({now}", "+inf"))
+        usage[job_type] = JobTypePermitUsage(used=used, limit=limit)
+    return usage
 
 
 async def process_metric_counts(session: AsyncSession) -> dict[str, int]:

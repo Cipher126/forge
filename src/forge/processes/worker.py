@@ -28,6 +28,7 @@ from forge.errors.execution import (
     InvalidQueueMessageError,
     JobTypePermitLostError,
 )
+from forge.errors.handlers import UnknownHandlerError
 from forge.observability.logging import configure_logging
 from forge.observability.tracing import configure_tracing, start_span
 from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
@@ -54,6 +55,22 @@ logger = structlog.get_logger()
 
 def create_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid7().hex[-8:]}"
+
+
+async def drain_worker_tasks(
+    tasks: set[asyncio.Task[None]], *, timeout_seconds: float
+) -> bool:
+    """Wait for active jobs, then cancel local ownership work at the deadline."""
+    if not tasks:
+        return True
+    done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+    await asyncio.gather(*done, return_exceptions=True)
+    if not pending:
+        return True
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    return False
 
 
 async def maintain_worker_heartbeat(
@@ -325,14 +342,38 @@ async def handle_reservation(
         if claimed is None:
             await logger.ainfo("duplicate_or_stale_queue_message", job_id=str(message.job_id))
             return
-        await execute_claimed_job(
-            resources,
-            settings,
-            claimed,
-            permit=permit,
-            thread_pool=thread_pool,
-            process_pool=process_pool,
-        )
+        try:
+            await execute_claimed_job(
+                resources,
+                settings,
+                claimed,
+                permit=permit,
+                thread_pool=thread_pool,
+                process_pool=process_pool,
+            )
+        except UnknownHandlerError as error:
+            try:
+                async with resources.sessions.begin() as session:
+                    next_status = await complete_attempt_failure(
+                        session,
+                        claimed=claimed,
+                        error=error,
+                        retry_base_ms=settings.worker_retry_base_ms,
+                        retry_cap_ms=settings.worker_retry_cap_ms,
+                    )
+                await logger.aerror(
+                    "handler_version_unsupported",
+                    job_id=str(claimed.job_id),
+                    job_type=claimed.job_type,
+                    handler_version=claimed.handler_version,
+                    next_status=next_status.value,
+                )
+            except AttemptOwnershipLostError:
+                await logger.awarning(
+                    "unsupported_handler_version_lost_ownership",
+                    job_id=str(claimed.job_id),
+                    attempt_id=str(claimed.attempt_id),
+                )
     finally:
         if permit is not None:
             await release_job_type_permit(resources.redis, permit)
@@ -429,8 +470,9 @@ async def run_worker(shutdown: asyncio.Event) -> None:
     process_pool = ProcessPoolExecutor(max_workers=settings.worker_concurrency)
     tasks: set[asyncio.Task[None]] = set()
     cycle_position = 0
+    heartbeat_stop = asyncio.Event()
     heartbeat = asyncio.create_task(
-        maintain_worker_heartbeat(resources, settings, worker_id, shutdown)
+        maintain_worker_heartbeat(resources, settings, worker_id, heartbeat_stop)
     )
     redis_retry_attempt = 0
     try:
@@ -486,16 +528,28 @@ async def run_worker(shutdown: asyncio.Event) -> None:
                 )
             )
     finally:
-        heartbeat.cancel()
+        await logger.ainfo(
+            "worker_draining",
+            active_jobs=len(tasks),
+            deadline_seconds=settings.worker_drain_timeout_seconds,
+        )
+        drained = await drain_worker_tasks(
+            tasks,
+            timeout_seconds=settings.worker_drain_timeout_seconds,
+        )
+        if not drained:
+            await logger.awarning(
+                "worker_drain_deadline_exceeded",
+                deadline_seconds=settings.worker_drain_timeout_seconds,
+            )
+        heartbeat_stop.set()
         await asyncio.gather(heartbeat, return_exceptions=True)
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
         try:
             await clear_worker_heartbeat(resources.redis, worker_id)
         except RedisError as error:
             await logger.awarning("worker_heartbeat_cleanup_failed", error=str(error))
-        thread_pool.shutdown(wait=True, cancel_futures=True)
-        process_pool.shutdown(wait=True, cancel_futures=True)
+        thread_pool.shutdown(wait=drained, cancel_futures=True)
+        process_pool.shutdown(wait=drained, cancel_futures=True)
         await resources.close()
         if tracer_provider is not None:
             tracer_provider.shutdown()

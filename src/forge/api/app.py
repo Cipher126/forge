@@ -3,9 +3,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from forge.api.admission import SubmissionGate
 from forge.api.error_handlers import register_error_handlers
 from forge.api.middleware.request_logging import log_request
 from forge.api.middleware.request_size import enforce_request_size
+from forge.api.middleware.submission_capacity import enforce_submission_capacity
 from forge.api.routes.api_keys import router as api_keys_router
 from forge.api.routes.audit import router as audit_router
 from forge.api.routes.handlers import router as handlers_router
@@ -30,6 +32,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     resources = RuntimeResources.create(settings)
     app.state.resources = resources
+    app.state.submission_gate = SubmissionGate(
+        limit=settings.api_submission_concurrency_limit,
+        retry_after_seconds=settings.admission_retry_after_seconds,
+    )
     try:
         yield
     finally:
@@ -53,6 +59,7 @@ def create_app() -> FastAPI:
     app.include_router(operations_router)
     register_error_handlers(app)
     app.middleware("http")(enforce_request_size)
+    app.middleware("http")(enforce_submission_capacity)
     app.middleware("http")(log_request)
     return app
 

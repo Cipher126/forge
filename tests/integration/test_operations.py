@@ -9,9 +9,14 @@ from sqlalchemy import delete
 from forge.api.app import create_app
 from forge.config import get_settings
 from forge.persistence.models import ApiKey, Job, JobAttempt, JobTransition
-from forge.queue.client import refresh_worker_heartbeat
+from forge.queue.client import (
+    acquire_job_type_permit,
+    refresh_worker_heartbeat,
+    release_job_type_permit,
+)
 from forge.queue.names import api_key_rate_limit_key, processing_queue_key, queue_key
 from forge.resources import RuntimeResources
+from forge.schemas.execution import JobTypePermit
 from forge.security.api_keys import issue_api_key
 
 pytestmark = [
@@ -96,6 +101,26 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
                 actor_id=worker_id,
             )
         )
+        session.add_all(
+            [
+                JobTransition(
+                    job_id=terminal_job.id,
+                    from_status="scheduled",
+                    to_status="queued",
+                    reason="scheduled_job_due",
+                    actor_type="scheduler",
+                    actor_id="operations-test",
+                ),
+                JobTransition(
+                    job_id=terminal_job.id,
+                    from_status="running",
+                    to_status="succeeded",
+                    reason="attempt_succeeded",
+                    actor_type="worker",
+                    actor_id=worker_id,
+                ),
+            ]
+        )
         await session.flush()
         running_job.status = "running"
         running_job.active_attempt_id = attempt.id
@@ -104,6 +129,13 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
     await refresh_worker_heartbeat(resources.redis, worker_id, 60)
     await resources.redis.rpush(high_queue, queued_message)
     await resources.redis.rpush(processing_key, f"operations-reserved-{uuid7()}")
+    permit = JobTypePermit(job_type="demo.generate_report", token=uuid7())
+    assert await acquire_job_type_permit(
+        resources.redis,
+        permit=permit,
+        limit=settings.job_type_concurrency_limits[permit.job_type],
+        lease_seconds=60,
+    )
     app = create_app()
     try:
         async with app.router.lifespan_context(app):
@@ -170,6 +202,18 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
                 assert "forge_outbox_unpublished" in metrics_response.text
                 assert "forge_attempts_running" in metrics_response.text
                 assert "forge_jobs_due" in metrics_response.text
+                assert "forge_jobs_enqueued_rate_per_minute" in metrics_response.text
+                assert "forge_jobs_completed_rate_per_minute" in metrics_response.text
+                assert "forge_job_failure_ratio" in metrics_response.text
+                assert "forge_dead_letter_jobs" in metrics_response.text
+                assert (
+                    'forge_job_type_permits_used{job_type="demo.generate_report"}'
+                    in metrics_response.text
+                )
+                assert (
+                    'forge_job_type_permit_utilization_ratio{job_type="demo.generate_report"}'
+                    in metrics_response.text
+                )
 
                 events_response = await client.get(
                     "/v1/admin/operations/events?after=0&once=true",
@@ -185,6 +229,7 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
                 )
                 assert forbidden.status_code == 403
     finally:
+        await release_job_type_permit(resources.redis, permit)
         await resources.redis.delete(heartbeat_key, processing_key)
         await resources.redis.lrem(high_queue, 1, queued_message)
         await resources.redis.delete(

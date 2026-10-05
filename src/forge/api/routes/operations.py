@@ -13,6 +13,8 @@ from forge.api.dependencies.auth import database_session, require_scope, require
 from forge.application.operations import (
     database_now,
     job_status_counts,
+    job_type_permit_usage,
+    operational_rates,
     performance_statistics,
     process_metric_counts,
     queue_statistics,
@@ -107,6 +109,11 @@ async def get_prometheus_metrics(
             queues,
             len(workers),
             await process_metric_counts(session),
+            await operational_rates(session),
+            await job_type_permit_usage(
+                request.app.state.resources.redis,
+                request.app.state.resources.settings.job_type_concurrency_limits,
+            ),
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )

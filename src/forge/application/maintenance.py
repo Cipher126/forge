@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.inspection import inspect
 from sqlalchemy.orm import aliased
@@ -10,7 +10,8 @@ from sqlalchemy.orm import aliased
 from forge.persistence.models import IdempotencyKey, Job, JobAttempt, JobTransition
 from forge.persistence.object_store import ObjectStore
 
-TERMINAL_STATUSES = ("succeeded", "failed", "dead_lettered", "cancelled")
+SUCCESSFUL_TERMINAL_STATUSES = ("succeeded", "cancelled")
+FAILED_TERMINAL_STATUSES = ("failed", "dead_lettered")
 
 
 def _json_value(value: Any) -> Any:
@@ -61,18 +62,28 @@ async def archive_terminal_jobs(
     session: AsyncSession,
     object_store: ObjectStore,
     *,
-    retention_days: int,
+    successful_retention_days: int,
+    failed_retention_days: int,
     batch_size: int,
 ) -> list[UUID]:
     database_now = await _database_now(session)
-    cutoff = database_now - timedelta(days=retention_days)
+    successful_cutoff = database_now - timedelta(days=successful_retention_days)
+    failed_cutoff = database_now - timedelta(days=failed_retention_days)
     replay = aliased(Job)
     jobs = list(
         await session.scalars(
             select(Job)
             .where(
-                Job.status.in_(TERMINAL_STATUSES),
-                Job.finished_at <= cutoff,
+                or_(
+                    and_(
+                        Job.status.in_(SUCCESSFUL_TERMINAL_STATUSES),
+                        Job.finished_at <= successful_cutoff,
+                    ),
+                    and_(
+                        Job.status.in_(FAILED_TERMINAL_STATUSES),
+                        Job.finished_at <= failed_cutoff,
+                    ),
+                ),
                 ~select(replay.id)
                 .where(replay.replayed_from_job_id == Job.id)
                 .exists(),
@@ -105,7 +116,7 @@ async def archive_terminal_jobs(
             "attempts": [_serialize_model(attempt) for attempt in attempts],
             "transitions": [_serialize_model(transition) for transition in transitions],
         }
-        await object_store.put_json_at(f"archives/jobs/{job.id}.json", archive)
+        await object_store.put_json_gzip_at(f"archives/jobs/{job.id}.json.gz", archive)
         await session.delete(job)
         archived.append(job.id)
     await session.flush()

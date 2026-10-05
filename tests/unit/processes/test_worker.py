@@ -7,7 +7,7 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from forge.config import Settings
-from forge.processes.worker import handle_reservation_with_recovery
+from forge.processes.worker import drain_worker_tasks, handle_reservation_with_recovery
 from forge.resources import RuntimeResources
 from forge.schemas.execution import ReservedQueueMessage
 
@@ -50,3 +50,28 @@ async def test_interrupted_reservation_is_requeued_after_redis_recovers(
     )
 
     assert calls == 1
+
+
+async def test_worker_drain_finishes_completed_tasks() -> None:
+    async def finish() -> None:
+        await asyncio.sleep(0)
+
+    task = asyncio.create_task(finish())
+
+    assert await drain_worker_tasks({task}, timeout_seconds=1) is True
+    assert task.done()
+    assert not task.cancelled()
+
+
+async def test_worker_drain_cancels_local_tasks_after_deadline() -> None:
+    started = asyncio.Event()
+
+    async def remain_active() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(remain_active())
+    await started.wait()
+
+    assert await drain_worker_tasks({task}, timeout_seconds=0.001) is False
+    assert task.cancelled()

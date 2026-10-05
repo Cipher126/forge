@@ -26,6 +26,7 @@ from forge.errors.execution import (
     PermanentHandlerError,
     TemporaryHandlerError,
 )
+from forge.errors.handlers import UnknownHandlerError
 from forge.errors.object_store import ObjectStoreUnavailableError
 from forge.persistence.models import Job, JobAttempt, JobTransition
 from forge.schemas.execution import ClaimedJob, LeaseRenewalOutcome, ReservedQueueMessage
@@ -181,6 +182,8 @@ def retry_delay_ms(attempt_number: int, *, base_ms: int, cap_ms: int) -> int:
 def classify_handler_failure(error: BaseException) -> tuple[FailureKind, bool, str]:
     if isinstance(error, HandlerCancelledError):
         return FailureKind.CANCELLED, False, "handler_cancelled"
+    if isinstance(error, UnknownHandlerError):
+        return FailureKind.PERMANENT, False, "handler_version_unsupported"
     if isinstance(error, PermanentHandlerError):
         return FailureKind.PERMANENT, False, "permanent_handler_error"
     if isinstance(error, TemporaryHandlerError):

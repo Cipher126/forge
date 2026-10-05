@@ -7,7 +7,12 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from redis.exceptions import RedisError
-from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import (
+    DisconnectionError,
+    InterfaceError,
+    OperationalError,
+)
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.responses import JSONResponse
 
 from forge.errors.api_keys import ApiKeyNotFoundError
@@ -17,7 +22,7 @@ from forge.errors.auth import (
     RateLimitExceededError,
     UnsupportedScopesError,
 )
-from forge.errors.capacity import SystemOverloadedError
+from forge.errors.capacity import SubmissionCapacityExceededError, SystemOverloadedError
 from forge.errors.dependencies import DependencyUnavailableError
 from forge.errors.handlers import UnknownHandlerError
 from forge.errors.jobs import (
@@ -174,6 +179,21 @@ async def system_overloaded_handler(
     )
 
 
+async def submission_capacity_exceeded_handler(
+    _request: Request, error: SubmissionCapacityExceededError
+) -> JSONResponse:
+    return error_response(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        code="submission_capacity_exceeded",
+        message=str(error),
+        details={
+            "active_submissions": error.active_submissions,
+            "limit": error.limit,
+        },
+        headers={"Retry-After": str(error.retry_after_seconds)},
+    )
+
+
 async def inline_payload_too_large_handler(
     _request: Request, error: InlinePayloadTooLargeError
 ) -> JSONResponse:
@@ -216,7 +236,13 @@ async def object_store_unavailable_handler(
 
 async def database_unavailable_handler(
     request: Request,
-    _error: OperationalError | InterfaceError | DisconnectionError | OSError,
+    _error: (
+        OperationalError
+        | InterfaceError
+        | DisconnectionError
+        | SQLAlchemyTimeoutError
+        | OSError
+    ),
 ) -> JSONResponse:
     return await dependency_unavailable_handler(
         request, DependencyUnavailableError("postgres")
@@ -262,6 +288,10 @@ def register_error_handlers(app: FastAPI) -> None:
     )
     app.add_exception_handler(JobResultUnavailableError, job_result_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(SystemOverloadedError, system_overloaded_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(
+        SubmissionCapacityExceededError,
+        submission_capacity_exceeded_handler,  # type: ignore[arg-type]
+    )
     app.add_exception_handler(InlinePayloadTooLargeError, inline_payload_too_large_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, request_validation_handler)  # type: ignore[arg-type]
     app.add_exception_handler(ValidationError, payload_validation_handler)  # type: ignore[arg-type]
@@ -273,4 +303,5 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(OperationalError, database_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(InterfaceError, database_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(DisconnectionError, database_unavailable_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(SQLAlchemyTimeoutError, database_unavailable_handler)  # type: ignore[arg-type]
     app.add_exception_handler(OSError, database_unavailable_handler)  # type: ignore[arg-type]

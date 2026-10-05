@@ -57,7 +57,6 @@ class JobPage:
     next_cursor: UUID | None
 
 
-IDEMPOTENCY_RETENTION = timedelta(hours=24)
 MAX_ATTEMPTS_LIMIT = 20
 def _visible_job_condition(api_key: ApiKey) -> ColumnElement[bool]:
     if "admin" in api_key.scopes:
@@ -227,6 +226,7 @@ async def submit_job(
     retry_after_seconds: int = 1,
     inline_payload_limit_bytes: int | None = None,
     object_store: ObjectStore | None = None,
+    idempotency_retention_hours: int = 24,
 ) -> SubmissionResult:
     definition: HandlerDefinition = handlers.resolve(submission.job_type)
     validated_payload = definition.validate_payload(submission.payload)
@@ -329,7 +329,7 @@ async def submit_job(
                 idempotency_key=submission.idempotency_key,
                 request_fingerprint=fingerprint,
                 job_id=job.id,
-                expires_at=database_now + IDEMPOTENCY_RETENTION,
+                expires_at=database_now + timedelta(hours=idempotency_retention_hours),
             )
         )
     if status is JobStatus.QUEUED:
@@ -420,6 +420,7 @@ async def replay_dead_lettered_job(
     retry_after_seconds: int = 1,
     inline_payload_limit_bytes: int | None = None,
     object_store: ObjectStore | None = None,
+    idempotency_retention_hours: int = 24,
 ) -> SubmissionResult:
     source = await session.scalar(select(Job).where(Job.id == source_job_id).with_for_update())
     if source is None or (source.api_key_id != api_key.id and "admin" not in api_key.scopes):
@@ -449,6 +450,7 @@ async def replay_dead_lettered_job(
         retry_after_seconds=retry_after_seconds,
         inline_payload_limit_bytes=inline_payload_limit_bytes,
         object_store=object_store,
+        idempotency_retention_hours=idempotency_retention_hours,
     )
     if not result.deduplicated:
         record_audit_event(

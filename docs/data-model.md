@@ -104,14 +104,17 @@ bounded field sizes will be reviewed in the first Alembic migration.
 
 ## Retention and archival
 
-The maintenance process removes expired idempotency records independently of
-job retention. Terminal jobs older than the configured retention window are
-serialized with their attempts and transitions to
-`archives/jobs/<job-id>.json`, then deleted from PostgreSQL. A job remains in
-PostgreSQL while another job names it as a replay source so the replay lineage
-foreign key remains valid.
+The maintenance process removes idempotency records after a configurable expiry,
+independently of job retention. Successful and cancelled jobs default to 30 days
+of retention; failed and dead-lettered jobs default to 90 days so operational
+evidence remains available longer. Eligible jobs are serialized with their
+attempts and transitions to `archives/jobs/<job-id>.json.gz`, then deleted from
+PostgreSQL. A job remains in PostgreSQL while another job names it as a replay
+source so the replay lineage foreign key remains valid.
 
 Payload and result objects that have no live job reference are deleted only
 after a configurable grace period. The delay protects objects uploaded shortly
 before a failed or unfinished database transaction. Archive objects use a
-separate prefix and are outside this reconciliation pass.
+separate prefix and are outside this reconciliation pass. Archives are gzip
+compressed JSON with deterministic gzip metadata and `application/json` content
+type.

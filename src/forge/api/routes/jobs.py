@@ -57,7 +57,11 @@ async def get_jobs(
     )
 
 
-@router.post("", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def create_job(
     body: SubmitJobRequest,
     request: Request,
@@ -90,6 +94,9 @@ async def create_job(
                 request.app.state.resources.settings.max_inline_payload_bytes
             ),
             object_store=request.app.state.resources.object_store,
+            idempotency_retention_hours=(
+                request.app.state.resources.settings.idempotency_retention_hours
+            ),
         )
         await session.commit()
     except Exception:
@@ -168,7 +175,11 @@ async def cancel_existing_job(
     return JobResponse.model_validate(job)
 
 
-@router.post("/{job_id}/replay", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/{job_id}/replay",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def replay_job(
     job_id: UUID,
     request: Request,
@@ -195,6 +206,9 @@ async def replay_job(
                 request.app.state.resources.settings.max_inline_payload_bytes
             ),
             object_store=request.app.state.resources.object_store,
+            idempotency_retention_hours=(
+                request.app.state.resources.settings.idempotency_retention_hours
+            ),
         )
         await session.commit()
     except Exception:

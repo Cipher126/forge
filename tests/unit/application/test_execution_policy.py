@@ -12,6 +12,7 @@ from forge.errors.execution import (
     PermanentHandlerError,
     TemporaryHandlerError,
 )
+from forge.errors.handlers import UnknownHandlerError
 from forge.errors.object_store import ObjectStoreUnavailableError
 from forge.queue.names import PRIORITY_CYCLE
 from forge.schemas.execution import ReservedQueueMessage
@@ -58,4 +59,9 @@ def test_handler_failures_have_explicit_retry_policy() -> None:
         FailureKind.TEMPORARY,
         True,
         "object_store_unavailable",
+    )
+    assert classify_handler_failure(UnknownHandlerError("version retired")) == (
+        FailureKind.PERMANENT,
+        False,
+        "handler_version_unsupported",
     )

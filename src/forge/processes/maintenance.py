@@ -28,7 +28,8 @@ async def run_maintenance(shutdown: asyncio.Event) -> None:
                 archived_jobs = await archive_terminal_jobs(
                     session,
                     resources.object_store,
-                    retention_days=settings.job_retention_days,
+                    successful_retention_days=settings.successful_job_retention_days,
+                    failed_retention_days=settings.failed_job_retention_days,
                     batch_size=settings.maintenance_batch_size,
                 )
             async with resources.sessions() as session:

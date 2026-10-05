@@ -91,7 +91,19 @@ async def test_job_submission_is_atomic_idempotent_and_owned() -> None:
                             OutboxEvent.job_id == UUID(created_job["id"])
                         )
                     )
+                    idempotency_record = await session.scalar(
+                        select(IdempotencyKey).where(
+                            IdempotencyKey.job_id == UUID(created_job["id"]),
+                            IdempotencyKey.idempotency_key == "quarterly-report-2026",
+                        )
+                    )
                 assert submission_event is not None
+                assert idempotency_record is not None
+                retention = idempotency_record.expires_at - idempotency_record.created_at
+                assert timedelta(hours=settings.idempotency_retention_hours) <= retention
+                assert retention < timedelta(
+                    hours=settings.idempotency_retention_hours, seconds=5
+                )
                 assert (
                     submission_event.payload["trace_id"]
                     == "4bf92f3577b34da6a3ce929d0e0e4736"

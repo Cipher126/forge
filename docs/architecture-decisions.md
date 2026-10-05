@@ -89,10 +89,11 @@ The dead-letter queue is represented by durable PostgreSQL state. Admin replay
 creates a new job linked to the original, preserving the original history and
 requiring an explicit decision about reuse of the side-effect idempotency key.
 
-## ADR-008: Three layers of capacity control
+## ADR-008: Four layers of capacity control
 
 Forge combines:
 
+- a local in-flight submission limit for each API process;
 - a local concurrency limit for each worker;
 - Redis-backed, expiring permits for global per-job-type concurrency; and
 - admission backpressure based on the complete outstanding backlog.
@@ -101,9 +102,19 @@ Waiting for a job-type permit does not consume an attempt. A client that exceeds
 its own rate limit receives `429 Too Many Requests`; system overload produces
 `503 Service Unavailable` with `Retry-After`.
 
-Initial defaults are four concurrent attempts per worker, a backlog threshold of
-50,000 jobs, 30-second permit leases, and permit renewal every 10 seconds.
-Testing will determine final values.
+The API gate runs before authentication so excess requests do not compete for a
+PostgreSQL connection merely to validate their credential. It rejects rather
+than waits, returns `503 submission_capacity_exceeded` with `Retry-After`, and
+releases its slot even when authentication or job creation fails. The default
+limit is six per API process against a pool capacity of ten. A five-slot limit
+rejected normal traffic during a measured 20-request-per-second regression,
+while six preserves four connections for health, status, and administrative
+work. Higher initial limits still allowed dependency failures when health and
+metrics requests overlapped extreme bursts.
+
+Other initial defaults are four concurrent attempts per worker, a backlog
+threshold of 50,000 jobs, 30-second permit leases, and permit renewal every 10
+seconds. Testing will determine final values.
 
 The backlog threshold is represented by 50,000 preallocated PostgreSQL admission
 slots. A submission claims one available slot with `FOR UPDATE SKIP LOCKED`, and
@@ -272,3 +283,15 @@ Only the current attempt token may finish a running job. If an attempt lease
 expires while cancellation is requested, recovery marks the attempt abandoned
 and the job cancelled instead of retrying it. Every job-state update and its
 append-only transition record occur in the same PostgreSQL transaction.
+
+## ADR-020: Unsupported handler versions are permanent failures
+
+Workers resolve the exact handler type and version stored with each job. If that
+version is no longer deployed, the claimed attempt fails immediately with
+failure kind `permanent` and error code `handler_version_unsupported`. Forge does
+not retry it because repeating the same deployment lookup cannot make progress.
+
+The job uses the existing terminal `failed` state. The attempt and transition
+records preserve the specific cause for operators and the dashboard. A separate
+durable job state would add lifecycle branches without changing scheduling,
+retry, or recovery behavior.

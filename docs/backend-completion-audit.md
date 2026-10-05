@@ -26,19 +26,19 @@ and production operations material.
 | Durable submission and execution | Complete | PostgreSQL job plus outbox transaction, Redis dispatch, database-owned attempt claim, persisted result |
 | At-least-once recovery | Complete and proven at tested scale | Lease recovery, reservation recovery, missing-delivery reconstruction, Redis outage, and a hard worker-container kill |
 | Retry and dead-letter handling | Complete | Failure classification, capped jittered retry, durable `dead_lettered` state, linked admin replay |
-| Idempotent submission | Complete with one policy gap | Per-key uniqueness and request fingerprint conflict detection; TTL is fixed at 24 hours rather than configurable |
+| Idempotent submission | Complete | Per-key uniqueness, request fingerprint conflict detection, and configurable expiry (24-hour default) |
 | Priority and scheduling | Complete | Weighted `8:2:1` claim cycle; PostgreSQL scheduling with concurrent-safe row claims |
 | Cancellation | Complete | Immediate queued cancellation and cooperative running cancellation through lease renewal |
 | Capacity controls | Complete, partially proven | Worker concurrency, leased job-type permits, exact PostgreSQL admission slots, Redis API-key rate limits; 10x overload experiment missing |
 | API security | Complete | Opaque HMAC-digested keys, scopes, admin separation, body limits, fixed handler registry, schema validation, audit records |
-| Handler compatibility | Partial | Exact handler version is stored and resolved; unsupported deployed versions fail cleanly, but there is no distinct durable `version_unsupported` state |
+| Handler compatibility | Complete | Exact handler versions are resolved; an unavailable deployed version immediately records a permanent `handler_version_unsupported` failure without retry |
 | Blob storage | Complete and proven at tested scale | Oversized payload/result routing, bounded outage response, eventual result retry, and orphan cleanup are implemented |
-| Retention and archival | Partial | Archival and purge exist; one retention period applies to all terminal states, archives are plain JSON, and failed/DLQ 90-day retention plus compression are missing |
-| Operational API | Complete | Summary, queues, workers, performance percentiles, authenticated Prometheus text, and SSE transitions |
+| Retention and archival | Complete | Configurable idempotency expiry, 30-day success/cancellation retention, 90-day failure/DLQ retention, gzip JSON archives, and safe orphan cleanup |
+| Operational API | Complete | Summary, queues, workers, performance percentiles, authenticated rate/capacity Prometheus metrics, and SSE transitions |
 | Logs and traces | Partial | Correlated structured logs, redaction, W3C trace propagation, and OTLP export exist; not every durable state transition emits its own structured log |
-| Deployment | Substantially complete | Non-root read-only image, migration gate, production Compose, two-replica validation topology, startup and integrity checks |
-| Automated failure validation | Partial | Redis failure tests, integrity validation, and a repeatable hard worker-kill scenario exist; PostgreSQL and object-store experiments are documented but still need one-command automation |
-| Performance evidence | Partial | Reproducible k6 harness and 10/20 jobs-per-second results exist; 1,000 jobs/sec, 100,000 jobs, claim latency, auth overhead, and 10x burst targets are unproven |
+| Deployment | Substantially complete | Non-root read-only image, migration gate, configurable worker drain deadline, production Compose, two-replica validation topology, and one-command startup, load, drain, health, and integrity acceptance validation |
+| Automated failure validation | Partial | Redis failure tests, integrity validation, repeatable hard worker-kill validation, and deployment acceptance exist; PostgreSQL and object-store outage experiments still need one-command automation |
+| Performance evidence | Partial | Reproducible k6 harness, 5,001-job observability run, controlled overload results, and 10/20 jobs-per-second results exist; 1,000 jobs/sec, 100,000 jobs, claim latency, auth overhead, and 10x burst targets are unproven |
 | Dashboard | Missing | Accepted later into scope; backend API support exists, React application has not started |
 
 ## Implemented backend capabilities
@@ -72,6 +72,10 @@ and production operations material.
 - Object-store operations have bounded network and application deadlines.
   Storage outages are audited as infrastructure attempts without exhausting the
   submitter's handler retry allowance.
+- An unavailable exact handler version immediately fails its claimed attempt as
+  a permanent `handler_version_unsupported` error. The existing `failed` job
+  state stays authoritative while attempt and transition records preserve the
+  specific diagnosis.
 
 ### Scheduling, capacity, and security
 
@@ -96,8 +100,13 @@ and production operations material.
   activity.
 - Trace context crosses the durable outbox and queue boundary; OTLP export is
   configurable.
-- Maintenance expires idempotency records, archives retained jobs, and removes
-  orphaned payload/result objects after a grace period.
+- Prometheus reports five-minute enqueue/completion rates, failure ratio,
+  dead-letter volume, and bounded-cardinality job-type permit utilization. The
+  local validation overlay provisions Prometheus, Grafana, Tempo, and a Forge
+  operations dashboard while keeping the scrape endpoint authenticated.
+- Maintenance expires idempotency records, retains failure evidence longer than
+  successful work, writes gzip JSON archives before deleting database rows, and
+  removes orphaned payload/result objects after a grace period.
 
 ## Proven behavior
 
@@ -118,47 +127,37 @@ The Linux validation environment has demonstrated:
 - Object storage unavailable during a blob-backed submission: `503` in 3.15
   seconds and no job persisted; unavailable during result storage: the accepted
   job retried and succeeded after storage returned.
+- A worker exceeded a two-second validation drain deadline: it exited in 2.49
+  seconds, its attempt became `abandoned/worker_lost`, and the other worker
+  completed attempt 2 successfully.
 - Zero violations across admission-slot, attempt-ownership, duplicate-attempt,
   and outbox-lease integrity checks.
+- The one-command deployment acceptance run started the complete topology,
+  accepted and completed 250/250 jobs at 10 jobs/sec, recorded 82.1 ms p95
+  submission latency, drained every queue, kept all 14 services online, passed
+  startup and integrity checks, and revoked its temporary credential.
 
 These results establish correctness at the tested load. They do not establish
 the PRD's maximum-throughput or 100,000-job claims.
 
 ## Remaining backend work
 
-### Priority 1: lifecycle policy completion
+### Priority 1: measurable observability and scale
 
-1. Add configurable idempotency retention instead of a fixed 24-hour constant.
-2. Split successful retention (30 days) from failed/dead-letter retention
-   (90 days).
-3. Decide whether archive compression is worth the added operational complexity;
-   if retained as a requirement, write compressed JSON and record content type.
-4. Add a configurable worker drain deadline. On expiry, terminate local handler
-   execution and leave lease-based recovery to another worker.
-5. Decide whether unsupported handler versions need a distinct durable state or
-   whether the accepted reduced lifecycle should remain authoritative.
-
-### Priority 2: measurable observability and scale
-
-1. Add counters/rates for enqueued and completed jobs, failure rate, DLQ size,
-   and per-job-type permit utilization to the metrics contract.
-2. Emit one structured log for every durable transition or explicitly document
+1. Emit one structured log for every durable transition or explicitly document
    the transition table plus SSE stream as the authoritative transition record.
-3. Add Prometheus, Grafana, and Tempo to a local observability Compose profile.
-4. Automate the Linux failure scenarios so results are reproducible without a
+2. Automate the Linux failure scenarios so results are reproducible without a
    manual sequence of Docker commands.
-5. Measure claim latency and authentication overhead separately.
-6. Run stepped capacity tests, then a 10x admission burst and a 100,000-job run.
+3. Measure claim latency and authentication overhead separately.
+4. Run stepped capacity tests, then a 10x admission burst and a 100,000-job run.
    Publish saturation, queue-depth, recovery-time, and latency graphs without
    claiming untested production capacity.
 
 ## Recommended sequence before dashboard work
 
-1. Complete retention and graceful-shutdown policies.
-2. Expand metrics and add the local observability profile.
-3. Automate the PostgreSQL and object-storage outage experiments.
-4. Run the large benchmark and finish the operations and tradeoff write-up.
-5. Freeze the backend API contract, then build the dashboard against it.
+1. Automate the PostgreSQL and object-storage outage experiments.
+2. Run the large benchmark and finish the operations and tradeoff write-up.
+3. Freeze the backend API contract, then build the dashboard against it.
 
 This order makes the dashboard a view over proven backend behavior and gives the
 portfolio project defensible failure and performance evidence rather than only

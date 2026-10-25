@@ -63,6 +63,14 @@ The GitHub Actions workflow implements backend integration checks and frontend
 build/component/mocked-browser checks. A checked-in workflow is not by itself
 evidence of a successful hosted run; consult the repository's Actions result.
 
+The first hosted dashboard job passed, including contract generation, build,
+component tests and all nine mocked browser flows. Backend setup, real test
+dependencies, migrations, lint and typing passed, but test collection exposed
+an entry-point difference: the `pytest` executable did not add the repository
+root to Python's import path, so repository validation helpers could not be
+imported. Pytest now explicitly includes the root, and CI uses `python -m pytest`.
+This changes test discovery configuration, not application behavior.
+
 ## Host recovery
 
 Docker Desktop initially failed before Forge could start, reporting a stale

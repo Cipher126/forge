@@ -34,7 +34,7 @@ jobs:
       - run: uv run alembic upgrade head
       - run: uv run ruff check --no-cache src scripts tests migrations
       - run: uv run mypy --no-incremental --cache-dir=/dev/null src/forge
-      - run: uv run pytest tests -p no:cacheprovider -q --junitxml=tests/reports/ci.xml
+      - run: uv run python -m pytest tests -p no:cacheprovider -q --junitxml=tests/reports/ci.xml
       - if: always()
         uses: actions/upload-artifact@v4
         with:

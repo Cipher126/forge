@@ -3,13 +3,13 @@ from time import monotonic
 
 import structlog
 from redis.exceptions import RedisError
-from sqlalchemy.exc import DBAPIError
 
 from forge.application.queue_recovery import restore_missing_queued_deliveries
 from forge.application.recovery import recover_expired_attempts
 from forge.application.reservation_recovery import reconcile_orphaned_reservations
 from forge.config import get_settings
 from forge.observability.logging import configure_logging
+from forge.persistence.database import DATABASE_RETRY_ERRORS
 from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
 from forge.resources import RuntimeResources
 
@@ -41,9 +41,7 @@ async def run_recovery(shutdown: asyncio.Event) -> None:
                     should_reconcile_deliveries = monotonic() >= next_delivery_reconciliation
                     restored = []
                     if should_reconcile_deliveries:
-                        restored = await restore_missing_queued_deliveries(
-                            session, resources.redis
-                        )
+                        restored = await restore_missing_queued_deliveries(session, resources.redis)
             except RedisError as error:
                 delay = retry_delay_seconds(
                     redis_retry_attempt,
@@ -59,7 +57,7 @@ async def run_recovery(shutdown: asyncio.Event) -> None:
                 )
                 await wait_for_shutdown(shutdown, delay)
                 continue
-            except (DBAPIError, OSError) as error:
+            except DATABASE_RETRY_ERRORS as error:
                 delay = retry_delay_seconds(
                     database_retry_attempt,
                     base_ms=settings.postgres_retry_base_ms,

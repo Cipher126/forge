@@ -969,6 +969,9 @@
             "title": "Cancelled Jobs",
             "type": "integer"
           },
+          "claim_time": {
+            "$ref": "#/components/schemas/DurationDistribution"
+          },
           "completed_jobs": {
             "title": "Completed Jobs",
             "type": "integer"
@@ -976,6 +979,9 @@
           "dead_lettered_jobs": {
             "title": "Dead Lettered Jobs",
             "type": "integer"
+          },
+          "end_to_end_time": {
+            "$ref": "#/components/schemas/DurationDistribution"
           },
           "execution_time": {
             "$ref": "#/components/schemas/DurationDistribution"
@@ -1041,7 +1047,9 @@
           "throughput_per_minute",
           "queue_wait",
           "execution_time",
-          "scheduling_lag"
+          "scheduling_lag",
+          "claim_time",
+          "end_to_end_time"
         ],
         "title": "PerformanceStatistics",
         "type": "object"
@@ -1839,6 +1847,33 @@
         "summary": "Get Worker Health",
         "tags": [
           "Operations"
+        ]
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "description": "Expose this key's identity and scopes without exposing its credential.",
+        "operationId": "get_current_key_v1_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Current Key",
+        "tags": [
+          "Authentication"
         ]
       }
     },

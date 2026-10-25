@@ -281,6 +281,7 @@ class IdempotencyKey(Base):
         CheckConstraint("octet_length(request_fingerprint) = 32", name="fingerprint_length"),
         CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
         Index("ix_idempotency_keys_expires_at", "expires_at"),
+        Index("ix_idempotency_keys_job_id", "job_id"),
     )
 
     id: Mapped[int] = mapped_column(

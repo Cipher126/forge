@@ -229,14 +229,14 @@ Forge uses different forms of validation for different claims:
 
 - pytest and pytest-asyncio for unit and application tests;
 - Hypothesis state machines for lifecycle invariants;
-- Testcontainers with real PostgreSQL and Redis for integration tests;
+- real PostgreSQL and Redis in a separate Compose project for integration tests;
 - explicit process and container termination for failure tests;
 - HTTPX for API contracts;
 - Vitest and Testing Library for dashboard components;
 - Playwright for browser workflows; and
 - k6 for load scenarios and performance thresholds.
 
-Observability uses structlog JSON logs, the Prometheus Python client, and
+Observability uses structlog JSON logs, authenticated Prometheus text metrics, and
 OpenTelemetry traces exported through OTLP. Local infrastructure includes
 Prometheus, Grafana, and Tempo. High-cardinality identifiers such as job IDs,
 attempt IDs, and API key IDs belong in logs and traces, not metric labels.
@@ -255,7 +255,7 @@ correctness or improve testing; trivial functions do not receive ceremonial
 interfaces.
 
 uv manages Python dependencies, npm manages the single dashboard package, and
-Docker Compose supplies PostgreSQL, Redis, MinIO, Prometheus, Grafana, and Tempo
+Docker Compose supplies PostgreSQL, Redis, S3-compatible storage, Prometheus, Grafana, and Tempo
 for local development and demonstrations.
 
 ## ADR-018: Identifier policy follows record scope
@@ -295,3 +295,42 @@ The job uses the existing terminal `failed` state. The attempt and transition
 records preserve the specific cause for operators and the dashboard. A separate
 durable job state would add lifecycle branches without changing scheduling,
 retry, or recovery behavior.
+
+## ADR-021: Committed transitions and measured acceptance
+
+PostgreSQL transition history is authoritative. Production sessions mirror
+new transition rows to structured logs only after the outer transaction
+commits. Savepoint rollback discards its buffered records. Logging failure must
+not convert a successful commit into a client error. A crash between commit
+and logging can omit a log, so SSE and database history remain the exact record.
+
+Claim timing is attached to new attempt transitions and exposed as an
+operational distribution. Authentication cost is measured with the actual
+database and Redis checks, with its idle/serial measurement limits recorded.
+Neither is inferred by subtracting unrelated HTTP benchmark numbers.
+
+One backend acceptance command runs the tests, deployment, dependency and worker
+failure experiments, bounded arrival-rate probes and real HTTP-submitted
+endurance workload. Correctness checks and throughput targets are reported
+separately. A target missed on local hardware remains a visible limitation;
+successful recovery is not evidence of arbitrary production capacity.
+
+## ADR-022: Dashboard credentials and a same-origin API
+
+The React/TypeScript dashboard uses the existing bearer-authenticated API. Its
+connection form validates a key through `GET /v1/auth/me`, which returns only
+public key metadata and scopes. Credentials remain in memory. Reload disconnects;
+explicit disconnect and HTTP 401 clear cached query and mutation data. There is
+no browser-local persistent administrator key or server-held shared UI credential.
+
+Vite proxies `/api` during development; a non-root Nginx container does the same
+in deployment. This keeps browser requests same-origin without broad CORS rules.
+UI scope checks are convenience only; the API enforces access and ownership.
+New credentials are displayed once and discarded when the creation dialog closes.
+
+Authenticated fetch consumes SSE and retains a transition cursor across stream
+reconnections. Polling continues if the stream fails, and invalidation is batched
+to bound traffic under heavy load. An initial SSE comment flushes idle connection
+headers immediately. API types are generated from the reviewed OpenAPI contract;
+CI rejects unreviewed schema drift. Browser mocks and real-stack validation are
+reported separately.

@@ -1,5 +1,25 @@
+from asyncpg import exceptions as asyncpg_errors  # type: ignore[import-untyped]
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, DisconnectionError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+DRIVER_CONNECTION_ERRORS: tuple[type[Exception], ...] = (
+    asyncpg_errors.PostgresConnectionError,
+    asyncpg_errors.CannotConnectNowError,
+    asyncpg_errors.AdminShutdownError,
+    asyncpg_errors.CrashShutdownError,
+    asyncpg_errors.TooManyConnectionsError,
+)
+# Connection establishment can expose raw asyncpg exceptions before SQLAlchemy
+# adapts them. Keep syntax/constraint errors outside the driver connection family.
+DATABASE_RETRY_ERRORS: tuple[type[Exception], ...] = (
+    DBAPIError,
+    DisconnectionError,
+    SQLAlchemyTimeoutError,
+    OSError,
+    *DRIVER_CONNECTION_ERRORS,
+)
 
 
 def create_database_engine(

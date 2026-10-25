@@ -3,7 +3,8 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import Float, func, select
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.domain.jobs import TERMINAL_JOB_STATUSES, JobStatus
@@ -97,6 +98,7 @@ async def performance_statistics(
         Job.started_at.is_not(None),
         Job.queued_at.is_not(None),
         Job.started_at >= cutoff,
+        Job.started_at >= Job.queued_at,
     )
     execution_time = await _duration_distribution(
         session,
@@ -113,6 +115,19 @@ async def performance_statistics(
         Job.queued_at >= cutoff,
         Job.queued_at >= Job.run_at,
     )
+    claim_time = await _duration_distribution(
+        session,
+        sql_cast(JobTransition.details["claim_seconds"].astext, Float),
+        JobTransition.reason == "attempt_claimed",
+        JobTransition.created_at >= cutoff,
+        JobTransition.details["claim_seconds"].astext.is_not(None),
+    )
+    end_to_end_time = await _duration_distribution(
+        session,
+        func.extract("epoch", Job.finished_at - Job.created_at),
+        Job.finished_at.is_not(None),
+        Job.finished_at >= cutoff,
+    )
     return PerformanceStatistics(
         generated_at=now,
         window_minutes=window_minutes,
@@ -128,6 +143,8 @@ async def performance_statistics(
         queue_wait=queue_wait,
         execution_time=execution_time,
         scheduling_lag=scheduling_lag,
+        claim_time=claim_time,
+        end_to_end_time=end_to_end_time,
     )
 
 
@@ -231,9 +248,7 @@ async def operational_rates(
     counts = {status: int(count) for status, count in rows.tuples()}
     enqueued = counts.get(JobStatus.QUEUED.value, 0)
     completed = sum(counts.get(status.value, 0) for status in TERMINAL_JOB_STATUSES)
-    failed = counts.get(JobStatus.FAILED.value, 0) + counts.get(
-        JobStatus.DEAD_LETTERED.value, 0
-    )
+    failed = counts.get(JobStatus.FAILED.value, 0) + counts.get(JobStatus.DEAD_LETTERED.value, 0)
     non_cancelled = completed - counts.get(JobStatus.CANCELLED.value, 0)
     return OperationalRates(
         window_minutes=window_minutes,

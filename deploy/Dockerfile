@@ -20,9 +20,8 @@ COPY README.md ./
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
-COPY scripts/check_startup.py scripts/validate_integrity.py ./scripts/
-RUN uv sync --frozen --no-dev \
-    && chown -R forge:forge /app
+COPY scripts/check_startup.py scripts/validate_integrity.py scripts/report_validation_jobs.py scripts/benchmark_auth.py ./scripts/
+RUN uv sync --frozen --no-dev
 
 USER forge
 CMD ["forge-api"]

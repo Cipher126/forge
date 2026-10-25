@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import Executor
 from datetime import datetime, timedelta
 from functools import partial
+from time import perf_counter
 from typing import cast
 from uuid import uuid7
 
@@ -278,6 +279,7 @@ async def claim_job_attempt(
     worker_id: str,
     lease_seconds: int,
 ) -> ClaimedJob | None:
+    claim_started = perf_counter()
     job = await session.scalar(select(Job).where(Job.id == message.job_id).with_for_update())
     if job is None:
         return None
@@ -327,7 +329,10 @@ async def claim_job_attempt(
             reason="attempt_claimed",
             actor_type=TransitionActor.WORKER.value,
             actor_id=worker_id,
-            details={"ownership_token": str(ownership_token)},
+            details={
+                "ownership_token": str(ownership_token),
+                "claim_seconds": perf_counter() - claim_started,
+            },
         )
     )
     await session.flush()

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from forge.config import Settings
 from forge.domain.handlers import HandlerRegistry
 from forge.handlers import create_handler_registry
+from forge.observability.transitions import ObservedSession
 from forge.persistence.database import create_database_engine
 from forge.persistence.object_store import ObjectStore
 from forge.queue.client import create_redis_client
@@ -33,7 +34,11 @@ class RuntimeResources:
         return cls(
             settings=settings,
             database=database,
-            sessions=async_sessionmaker(database, expire_on_commit=False),
+            sessions=async_sessionmaker(
+                database,
+                expire_on_commit=False,
+                sync_session_class=ObservedSession,
+            ),
             redis=create_redis_client(
                 settings.redis_url,
                 connect_timeout_seconds=settings.redis_connect_timeout_seconds,

@@ -135,6 +135,8 @@ async def stream_operational_events(
 
     async def events() -> AsyncIterator[str]:
         nonlocal cursor
+        # Flush the connection immediately, even when there are no new jobs.
+        yield ": connected\n\n"
         quiet_polls = 0
         while True:
             async with resources.sessions() as session:

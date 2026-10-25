@@ -43,6 +43,8 @@ async def test_maintenance_archives_jobs_and_reclaims_expired_data() -> None:
         result_key = await resources.object_store.put_json(
             "results", {"maintenance_test": str(uuid7())}
         )
+        original_payload = await resources.object_store.get_json(payload_key)
+        original_result = await resources.object_store.get_json(result_key)
         async with resources.sessions.begin() as session:
             owner = await issue_api_key(
                 session,
@@ -148,11 +150,11 @@ async def test_maintenance_archives_jobs_and_reclaims_expired_data() -> None:
             f"archives/jobs/{job.id}.json.gz",
             f"archives/jobs/{expired_failure.id}.json.gz",
         }
-        archive = await resources.object_store.get_json_gzip(
-            f"archives/jobs/{job.id}.json.gz"
-        )
-        assert archive["schema_version"] == 1
+        archive = await resources.object_store.get_json_gzip(f"archives/jobs/{job.id}.json.gz")
+        assert archive["schema_version"] == 2
         assert archive["job"]["id"] == str(job.id)
+        assert archive["job"]["payload"] == original_payload
+        assert archive["job"]["result"] == original_result
         assert archive["attempts"][0]["status"] == "succeeded"
         assert archive["transitions"][0]["reason"] == "handler_succeeded"
         failure_archive = await resources.object_store.get_json_gzip(
@@ -173,6 +175,11 @@ async def test_maintenance_archives_jobs_and_reclaims_expired_data() -> None:
             *await resources.object_store.list_objects("results/"),
         ]
         assert all(item.key not in {payload_key, result_key} for item in remaining_objects)
+        surviving_archive = await resources.object_store.get_json_gzip(
+            f"archives/jobs/{job.id}.json.gz"
+        )
+        assert surviving_archive["job"]["payload"] == original_payload
+        assert surviving_archive["job"]["result"] == original_result
     finally:
         for archive_key in archive_keys:
             await resources.object_store.delete(archive_key)
@@ -183,8 +190,86 @@ async def test_maintenance_archives_jobs_and_reclaims_expired_data() -> None:
         await resources.close()
 
 
+async def test_archival_does_not_shorten_an_active_idempotency_window() -> None:
+    settings = get_settings()
+    resources = RuntimeResources.create(settings)
+    old = datetime.now(UTC) - timedelta(days=40)
+    job_id = uuid7()
+    key_id = uuid7()
+    archive_key = f"archives/jobs/{job_id}.json.gz"
+    try:
+        async with resources.sessions.begin() as session:
+            owner = await issue_api_key(
+                session,
+                name="long idempotency window",
+                scopes={"jobs:write"},
+                pepper=settings.api_key_pepper.get_secret_value(),
+            )
+            key_id = owner.record.id
+            session.add(
+                Job(
+                    id=job_id,
+                    api_key_id=key_id,
+                    job_type="demo.generate_report",
+                    handler_version="1",
+                    status="succeeded",
+                    priority="normal",
+                    payload={"report_id": "retain-dedup", "format": "json"},
+                    result={"report_id": "retain-dedup", "format": "json"},
+                    max_attempts=1,
+                    attempt_count=1,
+                    finished_at=old,
+                    created_at=old,
+                )
+            )
+            await session.flush()
+            dedup = IdempotencyKey(
+                api_key_id=key_id,
+                job_id=job_id,
+                idempotency_key=f"long-ttl-{job_id}",
+                request_fingerprint=b"x" * 32,
+                created_at=old,
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+            )
+            session.add(dedup)
+        async with resources.sessions.begin() as session:
+            assert (
+                await archive_terminal_jobs(
+                    session,
+                    resources.object_store,
+                    successful_retention_days=30,
+                    failed_retention_days=90,
+                    batch_size=100,
+                )
+                == []
+            )
+        async with resources.sessions.begin() as session:
+            assert await session.get(Job, job_id) is not None
+            current_key = await session.get(IdempotencyKey, dedup.id)
+            assert current_key is not None
+            current_key.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with resources.sessions.begin() as session:
+            assert await archive_terminal_jobs(
+                session,
+                resources.object_store,
+                successful_retention_days=30,
+                failed_retention_days=90,
+                batch_size=100,
+            ) == [job_id]
+        async with resources.sessions() as session:
+            assert await session.get(Job, job_id) is None
+    finally:
+        await resources.object_store.delete(archive_key)
+        async with resources.sessions.begin() as session:
+            await session.execute(delete(Job).where(Job.id == job_id))
+            await session.execute(delete(ApiKey).where(ApiKey.id == key_id))
+        await resources.close()
+
+
+@pytest.mark.parametrize("failure_point", ["archive_write", "blob_read"])
 async def test_archive_storage_failure_keeps_database_job(
     monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
 ) -> None:
     settings = get_settings()
     resources = RuntimeResources.create(settings)
@@ -203,7 +288,12 @@ async def test_archive_storage_failure_keeps_database_job(
             handler_version="1",
             status="succeeded",
             priority="normal",
-            payload={"report_id": "archive-failure", "format": "json"},
+            payload=(
+                {"report_id": "archive-failure", "format": "json"}
+                if failure_point == "archive_write"
+                else None
+            ),
+            payload_blob_key="payloads/unavailable.json" if failure_point == "blob_read" else None,
             max_attempts=3,
             attempt_count=1,
             finished_at=old,
@@ -212,10 +302,14 @@ async def test_archive_storage_failure_keeps_database_job(
         )
         session.add(job)
 
-    async def fail_archive(_key: str, _value: object) -> None:
+    async def fail_archive(_key: str, _value: object = None) -> None:
         raise ObjectStoreUnavailableError("storage unavailable")
 
-    monkeypatch.setattr(resources.object_store, "put_json_gzip_at", fail_archive)
+    monkeypatch.setattr(
+        resources.object_store,
+        "get_json" if failure_point == "blob_read" else "put_json_gzip_at",
+        fail_archive,
+    )
     try:
         with pytest.raises(ObjectStoreUnavailableError, match="storage unavailable"):
             async with resources.sessions.begin() as session:

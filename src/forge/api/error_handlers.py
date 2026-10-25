@@ -34,6 +34,7 @@ from forge.errors.jobs import (
 )
 from forge.errors.object_store import ObjectStoreUnavailableError
 from forge.errors.payloads import InlinePayloadTooLargeError
+from forge.persistence.database import DRIVER_CONNECTION_ERRORS
 from forge.schemas.errors import ErrorDetail, ErrorResponse
 
 ErrorHandler = Callable[[Request, Exception], Awaitable[JSONResponse]]
@@ -229,24 +230,14 @@ async def redis_unavailable_handler(request: Request, _error: RedisError) -> JSO
 async def object_store_unavailable_handler(
     request: Request, _error: BotoCoreError | ClientError | ObjectStoreUnavailableError
 ) -> JSONResponse:
-    return await dependency_unavailable_handler(
-        request, DependencyUnavailableError("object_store")
-    )
+    return await dependency_unavailable_handler(request, DependencyUnavailableError("object_store"))
 
 
 async def database_unavailable_handler(
     request: Request,
-    _error: (
-        OperationalError
-        | InterfaceError
-        | DisconnectionError
-        | SQLAlchemyTimeoutError
-        | OSError
-    ),
+    _error: Exception,
 ) -> JSONResponse:
-    return await dependency_unavailable_handler(
-        request, DependencyUnavailableError("postgres")
-    )
+    return await dependency_unavailable_handler(request, DependencyUnavailableError("postgres"))
 
 
 async def request_validation_handler(
@@ -300,8 +291,10 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(BotoCoreError, object_store_unavailable_handler)
     app.add_exception_handler(ClientError, object_store_unavailable_handler)
     app.add_exception_handler(ObjectStoreUnavailableError, object_store_unavailable_handler)
-    app.add_exception_handler(OperationalError, database_unavailable_handler)  # type: ignore[arg-type]
-    app.add_exception_handler(InterfaceError, database_unavailable_handler)  # type: ignore[arg-type]
-    app.add_exception_handler(DisconnectionError, database_unavailable_handler)  # type: ignore[arg-type]
-    app.add_exception_handler(SQLAlchemyTimeoutError, database_unavailable_handler)  # type: ignore[arg-type]
-    app.add_exception_handler(OSError, database_unavailable_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(OperationalError, database_unavailable_handler)
+    app.add_exception_handler(InterfaceError, database_unavailable_handler)
+    app.add_exception_handler(DisconnectionError, database_unavailable_handler)
+    app.add_exception_handler(SQLAlchemyTimeoutError, database_unavailable_handler)
+    app.add_exception_handler(OSError, database_unavailable_handler)
+    for error_class in DRIVER_CONNECTION_ERRORS:
+        app.add_exception_handler(error_class, database_unavailable_handler)

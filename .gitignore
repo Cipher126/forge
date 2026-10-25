@@ -18,10 +18,15 @@ build/
 
 dashboard/node_modules/
 dashboard/dist/
+dashboard/*.tsbuildinfo
+dashboard/coverage/
+dashboard/.vite/
 playwright-report/
 test-results/
 tests/reports/
 load/results/*.json
+load/results/*.svg
+load/results/*.tmp
 deploy/observability/metrics-token
 
 .idea/

@@ -11,6 +11,11 @@ __pycache__
 .ruff_cache
 dashboard/node_modules
 dashboard/dist
+dashboard/playwright-report
+dashboard/test-results
+dashboard/coverage
+dashboard/.vite
+*.tsbuildinfo
 tests
 load
 docs

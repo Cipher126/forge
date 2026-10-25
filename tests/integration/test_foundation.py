@@ -26,6 +26,9 @@ async def test_migration_created_expected_tables() -> None:
             tables = await connection.run_sync(
                 lambda sync_connection: inspect(sync_connection).get_table_names()
             )
+            dedup_indexes = await connection.run_sync(
+                lambda sync_connection: inspect(sync_connection).get_indexes("idempotency_keys")
+            )
     finally:
         await engine.dispose()
 
@@ -39,6 +42,7 @@ async def test_migration_created_expected_tables() -> None:
         "jobs",
         "outbox_events",
     }.issubset(tables)
+    assert "ix_idempotency_keys_job_id" in {index["name"] for index in dedup_indexes}
 
 
 async def test_database_rejects_an_unknown_job_status() -> None:

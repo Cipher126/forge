@@ -1,6 +1,6 @@
 # Forge backend completion audit
 
-Status: Evidence-based review on 2026-09-30
+Status: Evidence-based review, updated on 2026-10-25
 
 This audit compares the original product requirements with the accepted
 architecture decisions and the current repository. Later decisions intentionally
@@ -17,9 +17,13 @@ observe jobs. Linux validation has demonstrated load-balanced API operation,
 worker draining, Redis, PostgreSQL, and object-storage interruption, and recovery
 without accepted-job loss.
 
-The backend is not yet complete by the project's definition of done. The main
-remaining work is failure evidence, scale evidence, a few lifecycle policy gaps,
-and production operations material.
+The accepted backend features and the remaining validation tooling are now
+implemented. The 100,000-job acceptance run and the separate 5,000-job runtime
+regression passed. This audit
+distinguishes implementation completion, measured correctness, and unmet
+performance hypotheses. The dashboard was subsequently implemented and verified
+against the real local stack on 2026-10-25; the original performance targets
+and external production validation remain open.
 
 | Area | Status | Evidence or gap |
 |---|---|---|
@@ -29,17 +33,17 @@ and production operations material.
 | Idempotent submission | Complete | Per-key uniqueness, request fingerprint conflict detection, and configurable expiry (24-hour default) |
 | Priority and scheduling | Complete | Weighted `8:2:1` claim cycle; PostgreSQL scheduling with concurrent-safe row claims |
 | Cancellation | Complete | Immediate queued cancellation and cooperative running cancellation through lease renewal |
-| Capacity controls | Complete, partially proven | Worker concurrency, leased job-type permits, exact PostgreSQL admission slots, Redis API-key rate limits; 10x overload experiment missing |
+| Capacity controls | Complete with measured overload evidence | Concurrency/permit/admission tests, per-key quotas, and a 10x burst with retryable rejection and completion of accepted work |
 | API security | Complete | Opaque HMAC-digested keys, scopes, admin separation, body limits, fixed handler registry, schema validation, audit records |
 | Handler compatibility | Complete | Exact handler versions are resolved; an unavailable deployed version immediately records a permanent `handler_version_unsupported` failure without retry |
 | Blob storage | Complete and proven at tested scale | Oversized payload/result routing, bounded outage response, eventual result retry, and orphan cleanup are implemented |
-| Retention and archival | Complete | Configurable idempotency expiry, 30-day success/cancellation retention, 90-day failure/DLQ retention, gzip JSON archives, and safe orphan cleanup |
+| Retention and archival | Complete | Configurable expiry and retention, schema 2 gzip archives containing external payload/result data, and orphan collection; archive read/write failure prevents row deletion |
 | Operational API | Complete | Summary, queues, workers, performance percentiles, authenticated rate/capacity Prometheus metrics, and SSE transitions |
-| Logs and traces | Partial | Correlated structured logs, redaction, W3C trace propagation, and OTLP export exist; not every durable state transition emits its own structured log |
-| Deployment | Substantially complete | Non-root read-only image, migration gate, configurable worker drain deadline, production Compose, two-replica validation topology, and one-command startup, load, drain, health, and integrity acceptance validation |
-| Automated failure validation | Partial | Redis failure tests, integrity validation, repeatable hard worker-kill validation, and deployment acceptance exist; PostgreSQL and object-store outage experiments still need one-command automation |
-| Performance evidence | Partial | Reproducible k6 harness, 5,001-job observability run, controlled overload results, and 10/20 jobs-per-second results exist; 1,000 jobs/sec, 100,000 jobs, claim latency, auth overhead, and 10x burst targets are unproven |
-| Dashboard | Missing | Accepted later into scope; backend API support exists, React application has not started |
+| Logs and traces | Complete | Correlated JSON and W3C/OTLP traces; production sessions mirror committed transitions, discard rollback buffers, and keep PostgreSQL/SSE authoritative |
+| Deployment | Complete local configuration and acceptance | Non-root read-only image, migration gates on every production process, log rotation, drain deadlines, two API replicas; actual hosting/TLS/backup restoration remains environment-specific |
+| Automated failure validation | Implemented for tested dependency scenarios | Redis failure tests, repeatable hard worker-kill validation, deployment acceptance, and one-command PostgreSQL/object-store outage recovery checks exist |
+| Performance evidence | Full endurance correctness passed | 100,000/100,000 completed with matching results and stable processes; stepped, burst, authentication, priority, latency and queue evidence is published; throughput and enqueue-to-claim targets remain unmet |
+| Dashboard | Implemented and locally verified | React/TypeScript UI, generated API types, scoped connection, SSE/polling, job lifecycle controls, results, workers/queues, handlers, key administration and audit history; mocked-browser and real-stack browser checks |
 
 ## Implemented backend capabilities
 
@@ -136,29 +140,72 @@ The Linux validation environment has demonstrated:
   accepted and completed 250/250 jobs at 10 jobs/sec, recorded 82.1 ms p95
   submission latency, drained every queue, kept all 14 services online, passed
   startup and integrity checks, and revoked its temporary credential.
+- Automated dependency validation on 2026-10-05 stopped PostgreSQL for five
+  seconds: three submissions received retryable 503 responses in 508–516 ms;
+  three previously accepted jobs and a retried submission succeeded without
+  Forge process restart. Storage loss rejected a blob payload in 3.037 seconds
+  without persisting a job. An inline job with one handler attempt allowed
+  survived five infrastructure failures and succeeded on attempt six with its
+  externally stored result verified. Normal configuration and credentials
+  were restored, and every integrity check remained at zero violations.
 
-These results establish correctness at the tested load. They do not establish
-the PRD's maximum-throughput or 100,000-job claims.
+The 2026-10-05 completion batch additionally submitted 100,000 distinct jobs
+through HTTP and verified 100,000 successes with matching report IDs/formats,
+zero integrity violations and no Forge process restart. The queue peaked at
+28,058 outstanding jobs and returned to zero. HTTP submission p95 was 323.6 ms;
+queue-wait p95 was 23.46 minutes. All priority tiers eventually completed.
 
-## Remaining backend work
+These results establish correctness at the tested load and the fixed-size
+100,000-job experiment. They do not establish the PRD's maximum-throughput
+or enqueue-to-claim latency targets. See the
+[dated acceptance evidence](benchmarks/2026-10-05-backend-acceptance.md).
 
-### Priority 1: measurable observability and scale
+## Completion batch
 
-1. Emit one structured log for every durable transition or explicitly document
-   the transition table plus SSE stream as the authoritative transition record.
-2. Automate the Linux failure scenarios so results are reproducible without a
-   manual sequence of Docker commands.
-3. Measure claim latency and authentication overhead separately.
-4. Run stepped capacity tests, then a 10x admission burst and a 100,000-job run.
-   Publish saturation, queue-depth, recovery-time, and latency graphs without
-   claiming untested production capacity.
+- After-commit structured transition logs, with transaction/savepoint rollback
+  and broken-log-sink coverage.
+- Database claim and end-to-end timing in the reviewed API contract.
+- A real idle authentication/rate-limit benchmark: combined p95 3.09 ms across
+  500 serial samples, with HTTP and load-contention limitations stated.
+- Stepped probes: 10, 20 and 40 arrivals/sec passed; 80 and 160 did not.
+  The 400/sec burst returned retryable 503 responses and every accepted job
+  completed. The short 1,000/sec probe did not deliver/accept the planned load.
+- A fixed 100,000-job HTTP workload, isolated durable/result verification,
+  priority measurements, queue samples and portable graph rendering.
+- `scripts/validate_backend.py` runs the entire acceptance sequence.
+- Production migration gates, bounded dependency defaults, log rotation,
+  operations/restore guidance, Redis-key documentation, architecture diagram,
+  accepted-tradeoff clarification and a dashboard API baseline.
+- Retention now embeds external data before deleting live rows. Worker traces
+  close even on permit denial and acquisition/release failure.
+- Raw PostgreSQL handshake/shutdown errors now use the same bounded dependency
+  response and in-process retry paths as adapted database errors. A real repeat
+  verified process survival after a preceding candidate failed that assertion.
+- A failed savepoint flush preserves earlier outer-transaction log records;
+  the targeted regression and the expanded 99-test suite passed.
+- The corrected runtime also passed deployment acceptance, PostgreSQL and
+  object-storage outages, hard worker kill and a separate 5,000-job regression
+  with matching stored results, stable processes and zero integrity violations.
 
-## Recommended sequence before dashboard work
+The backend feature and local correctness-validation batch is complete. No
+missing lifecycle feature is being deferred to the dashboard. The measured
+performance gaps remain explicit rather than being signed off as achieved.
 
-1. Automate the PostgreSQL and object-storage outage experiments.
-2. Run the large benchmark and finish the operations and tradeoff write-up.
-3. Freeze the backend API contract, then build the dashboard against it.
+## Explicit limits and the next phase
 
-This order makes the dashboard a view over proven backend behavior and gives the
-portfolio project defensible failure and performance evidence rather than only
-feature coverage.
+The PRD's 1,000 enqueue/sec hypothesis used five workers; this local benchmark
+uses two workers with eight execution slots and a four-permit report-handler cap.
+It does not establish that target. Its enqueue-to-worker-claim target of 50 ms
+also differs from the newly measured database claim-work timer. Default
+dispatcher/worker polling and queueing make that latency target unproven.
+
+Submission idempotency prevents duplicate jobs, not arbitrary repeated external
+effects. The accepted architecture corrected that draft PRD wording. Logs are
+best-effort mirrors; database transitions and SSE are the durable history.
+
+Actual multi-host failover, public TLS, external backups and production restore
+timings depend on the chosen environment and have not been claimed.
+
+Dashboard implementation and local integration checks are complete. Backend
+performance optimization remains an explicit engineering gap against the
+original targets; it can use the recorded latency, queue and saturation evidence.

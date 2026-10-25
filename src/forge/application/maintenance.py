@@ -40,9 +40,7 @@ async def _database_now(session: AsyncSession) -> datetime:
     return cast(datetime, value)
 
 
-async def delete_expired_idempotency_keys(
-    session: AsyncSession, *, batch_size: int
-) -> int:
+async def delete_expired_idempotency_keys(session: AsyncSession, *, batch_size: int) -> int:
     database_now = await _database_now(session)
     ids = list(
         await session.scalars(
@@ -84,8 +82,12 @@ async def archive_terminal_jobs(
                         Job.finished_at <= failed_cutoff,
                     ),
                 ),
-                ~select(replay.id)
-                .where(replay.replayed_from_job_id == Job.id)
+                ~select(replay.id).where(replay.replayed_from_job_id == Job.id).exists(),
+                ~select(IdempotencyKey.id)
+                .where(
+                    IdempotencyKey.job_id == Job.id,
+                    IdempotencyKey.expires_at > database_now,
+                )
                 .exists(),
             )
             .order_by(Job.finished_at, Job.id)
@@ -109,10 +111,17 @@ async def archive_terminal_jobs(
                 .order_by(JobTransition.id)
             )
         )
+        # Preserve the data before orphan collection removes the old external objects.
+        # Do not mutate the ORM row: failed reads/writes must leave it intact.
+        archived_job = _serialize_model(job)
+        if job.payload_blob_key is not None:
+            archived_job["payload"] = await object_store.get_json(job.payload_blob_key)
+        if job.result_blob_key is not None:
+            archived_job["result"] = await object_store.get_json(job.result_blob_key)
         archive = {
-            "schema_version": 1,
+            "schema_version": 2,
             "archived_at": database_now.isoformat(),
-            "job": _serialize_model(job),
+            "job": archived_job,
             "attempts": [_serialize_model(attempt) for attempt in attempts],
             "transitions": [_serialize_model(transition) for transition in transitions],
         }

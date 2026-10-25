@@ -68,3 +68,5 @@ class PerformanceStatistics(BaseModel):
     queue_wait: DurationDistribution
     execution_time: DurationDistribution
     scheduling_lag: DurationDistribution
+    claim_time: DurationDistribution
+    end_to_end_time: DurationDistribution

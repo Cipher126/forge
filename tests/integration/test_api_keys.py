@@ -46,6 +46,16 @@ async def test_admin_can_issue_key_and_scope_is_enforced() -> None:
                 writer_credential = response.json()["api_key"]
                 writer_id = response.json()["id"]
 
+                identity = await client.get(
+                    "/v1/auth/me",
+                    headers={"Authorization": f"Bearer {writer_credential}"},
+                )
+                assert identity.status_code == 200
+                assert identity.json()["id"] == writer_id
+                assert identity.json()["scopes"] == ["jobs:write"]
+                assert "secret_digest" not in identity.json()
+                assert writer_credential not in identity.text
+
                 listed = await client.get(
                     "/v1/admin/api-keys",
                     params={"enabled": True, "scope": "jobs:write"},
@@ -87,6 +97,11 @@ async def test_admin_can_issue_key_and_scope_is_enforced() -> None:
                 assert revoked.status_code == 200
                 assert revoked.json()["enabled"] is False
                 assert revoked.json()["revoked_at"] is not None
+                revoked_identity = await client.get(
+                    "/v1/auth/me",
+                    headers={"Authorization": f"Bearer {writer_credential}"},
+                )
+                assert revoked_identity.status_code == 401
 
                 repeated_revoke = await client.post(
                     f"/v1/admin/api-keys/{writer_id}/revoke",

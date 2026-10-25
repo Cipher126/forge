@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="155" viewBox="0 0 1100 155" role="img">
+<title>Worker kill: confirmed stop to replacement claim</title>
+<rect width="100%" height="100%" fill="white"/>
+<text x="30" y="35" font-family="sans-serif" font-size="22">Worker kill: confirmed stop to replacement claim</text>
+<text x="30" y="87" font-family="sans-serif">Replacement attempt</text>
+<rect x="310" y="65" width="600.00" height="32" fill="#2563eb"/>
+<text x="920.00" y="87" font-family="sans-serif">30.8 seconds</text>
+</svg>

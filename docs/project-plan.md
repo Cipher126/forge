@@ -1,6 +1,7 @@
 # Forge Project Plan
 
-Status: Working draft for review
+Status: Backend and dashboard implemented and locally verified;
+performance targets and external production validation remain open — 2026-10-25
 
 Forge will be built as a sequence of working, testable slices. Every milestone
 has a behavior to demonstrate and evidence to collect. Completing an early
@@ -12,6 +13,40 @@ changing the product's definition of done.
 
 The accepted initial lifecycle and logical PostgreSQL schema are recorded in
 `docs/data-model.md`.
+
+## Current milestone position
+
+| Milestone | Current position |
+|---|---|
+| 1. Durable core | Implemented and verified through real HTTP submissions, outbox delivery, claims and stored results |
+| 2. Failure handling | Implemented; dependency outages, hard worker kill, retry/recovery, idempotency and replay are covered |
+| 3. Scheduling, priority and cancellation | Implemented and tested; mixed-priority endurance measurements are published |
+| 4. Capacity and security | Implemented; scoped keys, quotas, concurrency, admission and explicit overload responses are verified |
+| 5. Data lifecycle and compatibility | Implemented; blob routing, retention, materialized archives, active-idempotency retention and version behavior are tested |
+| 6. Operational dashboard | Implemented; real API data, submission/scheduling, job and attempt timelines, results, cancellation/replay, workers/queues, handlers, scoped keys and audit history; component, mocked-browser and real-container browser checks passed |
+| 7. Observability and validation | Backend logs, traces, metrics, repeatable acceptance command, 100,000-job evidence and runtime regression passed; dashboard tests, same-origin container deployment and GitHub Actions checks are implemented |
+
+The expanded source suite passed 99 tests. The full HTTP endurance run completed
+100,000/100,000 jobs with matching results, stable Forge processes and zero
+integrity violations. The original 1,000-enqueue/sec and 50 ms enqueue-to-claim
+targets **remain unmet**; their failed probes and queue latency are published,
+not counted as passing performance acceptance. The completion batch also fixed
+archive data loss, long idempotency-window retention, worker trace cleanup,
+savepoint logging and raw PostgreSQL shutdown recovery.
+
+All planned product areas now have implementations and local verification.
+Backend performance optimization remains an explicit engineering gap: validate a named deployment and the intended
+five-worker topology, identify its limiting resources, and measure each change.
+Public hosting, TLS and external backup restoration depend on that deployment
+choice. The project is feature-complete for the agreed local portfolio scope;
+it does not meet the original performance targets or claim public production
+deployment. See [the dashboard guide](dashboard.md) and
+[completion verification](benchmarks/2026-10-25-project-verification.md).
+
+See the [completion audit](backend-completion-audit.md),
+[acceptance evidence](benchmarks/2026-10-05-backend-acceptance.md),
+[repeatable validation guide](backend-acceptance.md), and
+[dashboard API contract](backend-api-contract.md).
 
 ## 1. Durable core
 

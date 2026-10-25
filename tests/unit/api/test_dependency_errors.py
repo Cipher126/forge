@@ -1,5 +1,14 @@
 import json
 
+import httpx
+import pytest
+from asyncpg import (
+    AdminShutdownError,
+    CannotConnectNowError,
+    CrashShutdownError,
+    PostgresConnectionError,
+    TooManyConnectionsError,
+)
 from fastapi import FastAPI
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
@@ -60,3 +69,35 @@ def test_dependency_handlers_are_registered() -> None:
 
     assert RedisError in app.exception_handlers
     assert SQLAlchemyTimeoutError in app.exception_handlers
+
+
+@pytest.mark.parametrize(
+    "error_class",
+    [
+        CannotConnectNowError,
+        AdminShutdownError,
+        CrashShutdownError,
+        PostgresConnectionError,
+        TooManyConnectionsError,
+    ],
+)
+async def test_raw_driver_connection_error_returns_sanitized_503(
+    error_class: type[Exception],
+) -> None:
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/connection-error")
+    async def raise_connection_error() -> None:
+        raise error_class("postgres://user:secret@internal-host")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/connection-error")
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert response.json()["error"]["details"] == {"dependency": "postgres"}
+    assert "internal-host" not in response.text
+    assert "secret" not in response.text

@@ -6,27 +6,110 @@ execution, retry and recovery behavior, scheduling, concurrency control, and
 observable failure handling.
 
 The durable execution path, retries, scheduling, cancellation, dead-letter replay,
-and worker recovery are implemented. Design decisions live in
+worker recovery, and the React operations dashboard are implemented. Design decisions live in
 [`docs/architecture-decisions.md`](docs/architecture-decisions.md).
+
+Run the entire backend acceptance sequence with
+`uv run python scripts/validate_backend.py`. It includes all tests, deployment,
+dependency outages, worker recovery, capacity probes and 100,000 HTTP-submitted
+jobs. See [the acceptance guide](docs/backend-acceptance.md),
+[the operations runbook](docs/operations-runbook.md), and
+[the dashboard API contract](docs/backend-api-contract.md).
+
+## Run Forge
+
+```powershell
+uv sync --frozen
+uv run python scripts/start_forge.py
+```
+
+Open **http://127.0.0.1:13010** for the dashboard. Use the dedicated key creation
+command in the [dashboard guide](docs/dashboard.md) to connect. The same guide
+explains every screen, scopes, live updates, local frontend development and tests.
+The API is at port 18080; Grafana is at port 13000. Docker must be running with
+its Linux engine. These commands preserve local databases and do not rerun the
+long endurance benchmark.
+
+Backend and dashboard checks run in [GitHub Actions](.github/workflows/ci.yaml).
+The original throughput and enqueue-to-claim targets remain unmet; the
+[measured evidence](docs/benchmarks/2026-10-05-backend-acceptance.md) records both
+successful correctness checks and failed performance probes.
 
 ## Development prerequisites
 
 - Python 3.14
 - uv
 - Docker with Docker Compose
-- Node.js 24 and npm for the future dashboard
+- Node.js 24 and npm for dashboard development (Docker builds it otherwise)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Operator --> Dashboard[React dashboard and same-origin proxy]
+    Dashboard --> API
+    Client --> API[FastAPI]
+    API -->|Job and outbox commit| PG[(PostgreSQL)]
+    PG -->|Unpublished events| Dispatcher
+    Dispatcher --> Redis[(Redis queues)]
+    Redis -->|Reserve delivery| Workers
+    Workers -->|Claim lease and save outcome| PG
+    API -->|Large payloads| Objects[(S3 compatible storage)]
+    Workers -->|Large results| Objects
+    Scheduler -->|Promote due jobs| PG
+    Recovery -->|Recover ownership| PG
+    Recovery -->|Reconstruct deliveries| Redis
+```
+
+PostgreSQL commits acceptance before the API responds. Redis delivers work,
+while database attempt leases determine who can finish it. See the
+[architecture decisions](docs/architecture-decisions.md) for the reasoning.
+
+## Redis keys
+
+| Key | Type and purpose |
+|---|---|
+| `forge:queue:{high,normal,low}` | Lists: FIFO runnable deliveries per tier |
+| `forge:processing:{worker_id}` | List: that worker's reserved deliveries |
+| `forge:worker:{worker_id}:heartbeat` | Expiring heartbeat, default 15-second TTL |
+| `forge:permits:{job_type}` | Sorted set: leased global concurrency permits |
+| `forge:rate-limit:{public_id}` | Sorted set: API-key sliding request window |
+
+Scheduling, dead letters and submission idempotency are PostgreSQL records.
+They are not represented by authoritative delayed, DLQ or deduplication Redis keys.
+
+## Accepted tradeoffs
+
+- Execution is at least once. Submission idempotency prevents duplicate jobs;
+  a handler or downstream service must prevent duplicate external side effects.
+- PostgreSQL is the durability layer. Redis recovery reconstructs deliveries
+  with a delay and can cause another attempt after ownership expires.
+- Attempt leases, not heartbeat expiry alone, determine when another worker
+  can own work. The default lease is 30 seconds; recovery polls every second.
+- Cancellation and thread shutdown are cooperative. Already performed external
+  effects cannot be undone, and an uncooperative handler may finish.
+- Priority weights guarantee opportunities for lower tiers, not a fixed start deadline.
+- Large objects introduce a second storage dependency. Retention exports are
+  not complete disaster-recovery backups.
+- Throughput and latency are measured properties of a specific deployment.
+  The draft PRD's 1,000/sec and enqueue-to-claim targets are not promises.
+
+The draft PRD used different coordination mechanisms and overstated what
+submission idempotency could guarantee after a crash. The accepted architecture
+decisions supersede those details. See the
+[completion audit](docs/backend-completion-audit.md) and
+[benchmark evidence](docs/benchmarks/) for implemented behavior and limits.
 
 ## Production containers
 
 [`deploy/Dockerfile`](deploy/Dockerfile) builds one non-root, read-only-capable
 image for every Forge process. Copy `.env.production.example` to
 `.env.production`, replace every placeholder, build the image, and run the
-migration as a one-off task before starting services:
+migration gate before starting services:
 
 ```powershell
 Copy-Item .env.production.example .env.production
 docker compose -f deploy/compose.production.yaml build
-docker compose -f deploy/compose.production.yaml run --rm migrate
 docker compose -f deploy/compose.production.yaml up -d api dispatcher worker scheduler recovery maintenance
 ```
 
@@ -39,6 +122,8 @@ connections, plus migration and administrative connections.
 The production Compose file expects PostgreSQL, Redis, and S3-compatible object
 storage to be supplied externally. It does not embed development credentials or
 publish dependency ports.
+Each process waits for a successful migration. Container logs rotate at 10 MB
+with three files per process. Worker grace exceeds the configured drain deadline.
 
 Export the committed API contract after an intentional route or schema change
 with `uv run python scripts/export_openapi.py`. Contract tests fail when the
@@ -208,7 +293,7 @@ and identity-based cursor pagination.
 
 ## Operational API
 
-Dashboard data is available to administrator keys through three read-only
+Dashboard data is available to administrator keys through these read-only
 endpoints:
 
 - `GET /v1/admin/operations/summary` returns job-state totals, durable
@@ -218,7 +303,8 @@ endpoints:
 - `GET /v1/admin/operations/workers` reports live heartbeat TTL, active database
   attempts, and reserved Redis messages for each worker.
 - `GET /v1/admin/operations/performance?window_minutes=60` reports throughput,
-  outcomes, retries, and p50/p95 queue-wait, execution-time, and scheduling-lag
+  outcomes, retries, and p50/p95 queue-wait, execution-time, scheduling-lag,
+  database-claim and end-to-end
   distributions for a bounded time window.
 - `GET /v1/admin/operations/metrics` exposes authenticated, low-cardinality
   Prometheus gauges for durable state, queues, worker health, five-minute job
@@ -248,6 +334,12 @@ temporary load-test key, runs the measured k6 workload, waits for every accepted
 job, and verifies services, queues, startup dependencies, and database
 integrity. See [the deployment-validation guide](docs/deployment-validation.md)
 for its pass criteria, report locations, and configuration options.
+
+Run `uv run python scripts/validate_dependency_outages.py` on an idle local
+validation stack to reproduce PostgreSQL and object-storage loss and recovery.
+It restores each dependency, checks accepted-job completion and bounded error
+responses, verifies that Forge processes survive, and restores normal blob
+settings afterward. The deployment-validation guide documents the experiments.
 
 After migrations, `uv run python scripts/check_startup.py` verifies the Alembic
 head, PostgreSQL, Redis, object storage, and handler registry. Capture real query

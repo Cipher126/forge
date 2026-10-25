@@ -6,6 +6,10 @@ import { Counter } from "k6/metrics";
 const baseUrl = __ENV.BASE_URL || "http://127.0.0.1:8000";
 const apiKey = __ENV.API_KEY;
 const acceptedJobs = new Counter("forge_jobs_accepted");
+const rejectedJobs = new Counter("forge_jobs_rejected");
+const serverErrors = new Counter("forge_server_errors");
+const unavailableResponses = new Counter("forge_service_unavailable");
+const throttledJobs = new Counter("forge_jobs_throttled");
 const waitEvery = Number(__ENV.WAIT_EVERY || 0);
 const waitSeconds = Number(__ENV.WAIT_SECONDS || 2);
 
@@ -65,6 +69,10 @@ export default function () {
   const accepted = check(response, {
     "submission accepted": (result) => result.status === 202,
   });
+  rejectedJobs.add(response.status !== 202 ? 1 : 0);
+  serverErrors.add(response.status >= 500 && response.status !== 503 ? 1 : 0);
+  unavailableResponses.add(response.status === 503 ? 1 : 0);
+  throttledJobs.add(response.status === 429 ? 1 : 0);
   if (accepted) {
     acceptedJobs.add(1);
   }
@@ -74,7 +82,7 @@ export function handleSummary(data) {
   const summaryPath = __ENV.SUMMARY_PATH || "load/results/k6-summary.json";
   const metric = (name) => data.metrics[name]?.values || {};
   const report = {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     workload: {
       base_url: baseUrl,
@@ -87,6 +95,10 @@ export function handleSummary(data) {
     },
     metrics: {
       accepted_jobs: metric("forge_jobs_accepted"),
+      rejected_jobs: metric("forge_jobs_rejected"),
+      server_errors: metric("forge_server_errors"),
+      service_unavailable: metric("forge_service_unavailable"),
+      throttled_jobs: metric("forge_jobs_throttled"),
       checks: metric("checks"),
       dropped_iterations: metric("dropped_iterations"),
       http_request_duration: metric("http_req_duration"),

@@ -1,6 +1,6 @@
 # Forge Technology Stack
 
-Status: Accepted design; application scaffolding has not started.
+Status: Backend and React dashboard implemented; measured performance limits documented.
 
 ## Backend
 
@@ -40,7 +40,7 @@ execution.
 |---|---|
 | Unit/application behavior | pytest and pytest-asyncio |
 | Lifecycle invariants | Hypothesis stateful testing |
-| PostgreSQL and Redis semantics | Testcontainers |
+| PostgreSQL and Redis semantics | Real, separate Docker Compose test dependencies |
 | API contracts | HTTPX |
 | Failure recovery | Controlled process/container termination |
 | Dashboard components | Vitest and Testing Library |
@@ -50,7 +50,7 @@ execution.
 ## Observability
 
 - structlog emits correlated JSON logs.
-- prometheus-client exposes low-cardinality metrics.
+- Authenticated endpoints expose low-cardinality Prometheus text metrics.
 - OpenTelemetry emits traces through OTLP.
 - Prometheus, Grafana, and Tempo provide the local observability environment.
 
@@ -89,7 +89,10 @@ documented API as any other client.
 
 - Ruff handles Python linting and formatting.
 - mypy checks Python types.
-- ESLint and Prettier check dashboard code.
-- Pre-commit hooks run quick local checks.
+- TypeScript checks the dashboard; Prettier formats its source.
+- Vitest checks components and API/SSE handling; Playwright checks browser flows.
+- `scripts/validate_backend.py` runs the backend checks and experiments.
 
-Exact dependency versions will be selected and locked when scaffolding begins.
+Backend dependencies are pinned in `uv.lock`; dashboard dependencies are pinned
+in `dashboard/package-lock.json`. GitHub Actions runs backend and dashboard
+checks on pushes and pull requests. Pre-commit hooks are not currently configured.

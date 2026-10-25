@@ -1,7 +1,6 @@
 import asyncio
 
 import structlog
-from sqlalchemy.exc import DBAPIError
 
 from forge.application.outbox import (
     claim_outbox_events,
@@ -12,6 +11,7 @@ from forge.application.outbox import (
 from forge.config import Settings, get_settings
 from forge.errors.outbox import OutboxClaimLostError, OutboxPublishError
 from forge.observability.logging import configure_logging
+from forge.persistence.database import DATABASE_RETRY_ERRORS
 from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
 from forge.resources import RuntimeResources
 
@@ -73,7 +73,7 @@ async def run_dispatcher(shutdown: asyncio.Event) -> None:
         while not shutdown.is_set():
             try:
                 dispatched = await dispatch_once(resources, settings)
-            except (DBAPIError, OSError) as error:
+            except DATABASE_RETRY_ERRORS as error:
                 delay = retry_delay_seconds(
                     database_retry_attempt,
                     base_ms=settings.postgres_retry_base_ms,

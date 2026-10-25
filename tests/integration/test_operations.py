@@ -105,6 +105,15 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
             [
                 JobTransition(
                     job_id=terminal_job.id,
+                    from_status="queued",
+                    to_status="running",
+                    reason="attempt_claimed",
+                    actor_type="worker",
+                    actor_id=worker_id,
+                    details={"claim_seconds": 0.012},
+                ),
+                JobTransition(
+                    job_id=terminal_job.id,
                     from_status="scheduled",
                     to_status="queued",
                     reason="scheduled_job_due",
@@ -190,6 +199,9 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
                 assert performance["queue_wait"]["p50_seconds"] is not None
                 assert performance["execution_time"]["sample_count"] >= 1
                 assert performance["scheduling_lag"]["sample_count"] >= 1
+                assert performance["claim_time"]["sample_count"] >= 1
+                assert performance["claim_time"]["p95_seconds"] >= 0
+                assert performance["end_to_end_time"]["sample_count"] >= 1
 
                 metrics_response = await client.get(
                     "/v1/admin/operations/metrics", headers=admin_headers
@@ -221,6 +233,7 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
                 )
                 assert events_response.status_code == 200
                 assert "text/event-stream" in events_response.headers["content-type"]
+                assert events_response.text.startswith(": connected\n\n")
                 assert "event: job.transition" in events_response.text
 
                 forbidden = await client.get(
@@ -243,9 +256,7 @@ async def test_admin_operational_endpoints_combine_database_and_redis_state() ->
                 running.status = "cancelled"
                 running.finished_at = datetime.now(UTC)
             await session.flush()
-            await session.execute(
-                delete(Job).where(Job.id.in_([running_job.id, terminal_job.id]))
-            )
+            await session.execute(delete(Job).where(Job.id.in_([running_job.id, terminal_job.id])))
             await session.execute(
                 delete(ApiKey).where(ApiKey.id.in_([admin.record.id, reader.record.id]))
             )

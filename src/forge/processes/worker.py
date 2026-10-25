@@ -10,7 +10,6 @@ from uuid import uuid7
 import structlog
 from opentelemetry.trace import Span, SpanKind
 from redis.exceptions import RedisError
-from sqlalchemy.exc import DBAPIError
 
 from forge.application.execution import (
     claim_job_attempt,
@@ -31,6 +30,7 @@ from forge.errors.execution import (
 from forge.errors.handlers import UnknownHandlerError
 from forge.observability.logging import configure_logging
 from forge.observability.tracing import configure_tracing, start_span
+from forge.persistence.database import DATABASE_RETRY_ERRORS
 from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
 from forge.queue.client import (
     acknowledge_message,
@@ -57,9 +57,7 @@ def create_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid7().hex[-8:]}"
 
 
-async def drain_worker_tasks(
-    tasks: set[asyncio.Task[None]], *, timeout_seconds: float
-) -> bool:
+async def drain_worker_tasks(tasks: set[asyncio.Task[None]], *, timeout_seconds: float) -> bool:
     """Wait for active jobs, then cancel local ownership work at the deadline."""
     if not tasks:
         return True
@@ -316,21 +314,21 @@ async def handle_reservation(
         structlog.contextvars.bind_contextvars(trace_id=message.trace_id, span_id=span_id)
 
     permit: JobTypePermit | None = None
-    limit = settings.job_type_concurrency_limits.get(message.job_type)
-    if limit is not None:
-        permit = JobTypePermit(job_type=message.job_type, token=uuid7())
-        acquired = await acquire_job_type_permit(
-            resources.redis,
-            permit=permit,
-            limit=limit,
-            lease_seconds=settings.job_type_permit_lease_seconds,
-        )
-        if not acquired:
-            await requeue_message(resources.redis, reservation)
-            await asyncio.sleep(settings.worker_poll_interval_ms / 1000)
-            return
-
+    permit_acquired = False
     try:
+        limit = settings.job_type_concurrency_limits.get(message.job_type)
+        if limit is not None:
+            permit = JobTypePermit(job_type=message.job_type, token=uuid7())
+            permit_acquired = await acquire_job_type_permit(
+                resources.redis,
+                permit=permit,
+                limit=limit,
+                lease_seconds=settings.job_type_permit_lease_seconds,
+            )
+            if not permit_acquired:
+                await requeue_message(resources.redis, reservation)
+                await asyncio.sleep(settings.worker_poll_interval_ms / 1000)
+                return
         async with resources.sessions.begin() as session:
             claimed = await claim_job_attempt(
                 session,
@@ -375,12 +373,14 @@ async def handle_reservation(
                     attempt_id=str(claimed.attempt_id),
                 )
     finally:
-        if permit is not None:
-            await release_job_type_permit(resources.redis, permit)
-        if trace_bound:
-            structlog.contextvars.unbind_contextvars("trace_id", "span_id")
-        if span_manager is not None:
-            span_manager.__exit__(None, None, None)
+        try:
+            if permit is not None and permit_acquired:
+                await release_job_type_permit(resources.redis, permit)
+        finally:
+            if trace_bound:
+                structlog.contextvars.unbind_contextvars("trace_id", "span_id")
+            if span_manager is not None:
+                span_manager.__exit__(None, None, None)
 
 
 async def handle_reservation_with_recovery(
@@ -432,7 +432,7 @@ async def handle_reservation_with_recovery(
                 requeued=requeued,
             )
             return
-    except (DBAPIError, OSError) as error:
+    except DATABASE_RETRY_ERRORS as error:
         await logger.awarning(
             "reservation_interrupted_by_database",
             queue=reservation.processing_queue,

@@ -1,11 +1,11 @@
 import asyncio
 
 import structlog
-from sqlalchemy.exc import DBAPIError
 
 from forge.application.scheduling import promote_due_jobs
 from forge.config import get_settings
 from forge.observability.logging import configure_logging
+from forge.persistence.database import DATABASE_RETRY_ERRORS
 from forge.processes.lifecycle import retry_delay_seconds, run_process, wait_for_shutdown
 from forge.resources import RuntimeResources
 
@@ -25,7 +25,7 @@ async def run_scheduler(shutdown: asyncio.Event) -> None:
                         session,
                         batch_size=settings.scheduler_batch_size,
                     )
-            except (DBAPIError, OSError) as error:
+            except DATABASE_RETRY_ERRORS as error:
                 delay = retry_delay_seconds(
                     database_retry_attempt,
                     base_ms=settings.postgres_retry_base_ms,

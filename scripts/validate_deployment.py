@@ -20,9 +20,7 @@ TOKEN_FILE = ROOT / "deploy" / "observability" / "metrics-token"
 REPORTS = ROOT / "tests" / "reports"
 LOAD_RESULTS = ROOT / "load" / "results"
 API_URL = "http://127.0.0.1:18080"
-K6_IMAGE = (
-    "grafana/k6@sha256:23f2279054c3e01535455c4d92914a625df12aeb631ea0e3ea7a43f96bcbc843"
-)
+K6_IMAGE = "grafana/k6@sha256:23f2279054c3e01535455c4d92914a625df12aeb631ea0e3ea7a43f96bcbc843"
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "dead_lettered", "cancelled"})
 REQUIRED_SERVICES = frozenset(
     {
@@ -147,8 +145,8 @@ def get_admin_token(*, may_rotate: bool) -> str:
     return token
 
 
-def create_validation_key(admin_token: str) -> tuple[str, str]:
-    expires_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+def create_validation_key(admin_token: str, *, lifetime_hours: int = 1) -> tuple[str, str]:
+    expires_at = (datetime.now(UTC) + timedelta(hours=lifetime_hours)).isoformat()
     created = request_json(
         "POST",
         "/v1/admin/api-keys",
@@ -450,9 +448,7 @@ def main() -> int:
                 report["revocation_error"] = f"{type(error).__name__}: {error}"
                 report["passed"] = False
         report["finished_at"] = datetime.now(UTC).isoformat()
-        report["duration_seconds"] = round(
-            (datetime.now(UTC) - started_at).total_seconds(), 3
-        )
+        report["duration_seconds"] = round((datetime.now(UTC) - started_at).total_seconds(), 3)
         report_path.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

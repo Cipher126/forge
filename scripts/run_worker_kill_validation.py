@@ -1,6 +1,7 @@
 import argparse
 import json
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -8,10 +9,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts import validate_deployment as validation  # noqa: E402
+
 COMPOSE_FILE = ROOT / "deploy" / "compose.validation.yaml"
 DEFAULT_BASE_URL = "http://127.0.0.1:18080"
 TERMINAL_STATUSES = {"succeeded", "failed", "dead_lettered", "cancelled"}
@@ -30,7 +36,15 @@ def run(*arguments: str) -> str:
 
 
 def compose(*arguments: str) -> str:
-    return run("docker", "compose", "-f", str(COMPOSE_FILE), *arguments)
+    return run(
+        "docker",
+        "compose",
+        "-f",
+        str(COMPOSE_FILE),
+        "-f",
+        str(validation.OBSERVABILITY_COMPOSE),
+        *arguments,
+    )
 
 
 def request_json(
@@ -53,34 +67,10 @@ def request_json(
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            return json.load(response)
+            return cast(dict[str, Any], json.load(response))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"{method} {url} returned HTTP {error.code}: {detail}") from error
-
-
-def create_validation_key() -> str:
-    output = compose(
-        "run",
-        "--rm",
-        "--no-deps",
-        "api-1",
-        "forge",
-        "key",
-        "create",
-        "--name",
-        f"worker-kill-validation-{uuid4().hex[:8]}",
-        "--scope",
-        "jobs:read",
-        "--scope",
-        "jobs:write",
-        "--rate-limit-requests",
-        "10000",
-    )
-    credential = output.splitlines()[-1].strip()
-    if not credential.startswith("forge_live_"):
-        raise RuntimeError("Forge CLI did not return an API credential")
-    return credential
 
 
 def wait_for_running_attempt(
@@ -92,12 +82,12 @@ def wait_for_running_attempt(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        attempts = request_json(
-            "GET", f"{base_url}/v1/jobs/{job_id}/attempts", api_key=api_key
-        )["items"]
+        attempts = request_json("GET", f"{base_url}/v1/jobs/{job_id}/attempts", api_key=api_key)[
+            "items"
+        ]
         running = [attempt for attempt in attempts if attempt["status"] == "running"]
         if running:
-            return running[-1]
+            return cast(dict[str, Any], running[-1])
         time.sleep(0.25)
     raise TimeoutError("job did not enter a running attempt before the deadline")
 
@@ -146,11 +136,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    arguments = parse_arguments()
-    compose("up", "-d", "worker-1", "worker-2")
-    time.sleep(2)
-    api_key = create_validation_key()
+def validate(arguments: argparse.Namespace, api_key: str) -> dict[str, Any]:
     submitted_at = datetime.now(UTC)
     job = request_json(
         "POST",
@@ -174,6 +160,7 @@ def main() -> None:
     )
     killed_container = worker_container_for(first_attempt["worker_id"])
     with kill_worker_temporarily(killed_container):
+        killed_at = datetime.now(UTC)
         terminal_job = wait_for_terminal_job(
             arguments.base_url,
             api_key,
@@ -213,6 +200,7 @@ def main() -> None:
         "job_id": job["id"],
         "killed_worker_id": first_attempt["worker_id"],
         "killed_container_id": killed_container[:12],
+        "killed_at": killed_at.isoformat(),
         "final_status": terminal_job["status"],
         "attempts": [
             {
@@ -220,18 +208,44 @@ def main() -> None:
                 "status": attempt["status"],
                 "worker_id": attempt["worker_id"],
                 "failure_kind": attempt["failure_kind"],
+                "started_at": attempt["started_at"],
+                "finished_at": attempt["finished_at"],
             }
             for attempt in attempts
         ],
         "integrity_checks": integrity_checks,
-        "elapsed_seconds": round(
-            (datetime.now(UTC) - submitted_at).total_seconds(), 3
-        ),
+        "recovery_claim_seconds": (
+            datetime.fromisoformat(attempts[1]["started_at"]) - killed_at
+        ).total_seconds(),
+        "elapsed_seconds": round((datetime.now(UTC) - submitted_at).total_seconds(), 3),
     }
+    return report
+
+
+def main() -> None:
+    arguments = parse_arguments()
+    validation.wait_for_ready(120)
+    admin_token = validation.get_admin_token(may_rotate=False)
+    key_id, api_key = validation.create_validation_key(admin_token)
+    report: dict[str, Any] = {"passed": False}
+    try:
+        report.update(validate(arguments, api_key))
+        report["passed"] = True
+    except Exception as error:
+        report["error"] = f"{type(error).__name__}: {error}"
+    finally:
+        try:
+            validation.revoke_validation_key(admin_token, key_id)
+            report["validation_key_revoked"] = True
+        except Exception as error:
+            report["cleanup_error"] = type(error).__name__
+            report["passed"] = False
     output = ROOT / "tests" / "reports" / "worker-kill-validation.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
+    if not report["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

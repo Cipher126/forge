@@ -1,0 +1,69 @@
+name: Forge checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: forge-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORGE_RUN_INTEGRATION: '1'
+      FORGE_ENVIRONMENT: test
+      FORGE_API_KEY_PEPPER: development-only-change-me
+      FORGE_POSTGRES_URL: postgresql+asyncpg://forge:forge@127.0.0.1:54321/forge
+      FORGE_POSTGRES_CONNECT_TIMEOUT_SECONDS: '5'
+      FORGE_REDIS_URL: redis://127.0.0.1:56379/0
+      FORGE_OBJECT_STORE_ENDPOINT_URL: http://127.0.0.1:59000
+      FORGE_OBJECT_STORE_ACCESS_KEY: forge
+      FORGE_OBJECT_STORE_SECRET_KEY: development-only-change-me
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.11'
+          python-version: '3.14'
+      - run: uv sync --frozen
+      - run: docker compose up -d --wait
+      - run: uv run alembic upgrade head
+      - run: uv run ruff check --no-cache src scripts tests migrations
+      - run: uv run mypy --no-incremental --cache-dir=/dev/null src/forge
+      - run: uv run pytest tests -p no:cacheprovider -q --junitxml=tests/reports/ci.xml
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-results
+          path: tests/reports/ci.xml
+      - if: always()
+        run: docker compose down
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run generate:api
+      - run: git diff --exit-code -- src/generated/api.ts
+      - run: npm run build
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-browser-results
+          path: dashboard/playwright-report/
